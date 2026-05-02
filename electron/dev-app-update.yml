@@ -1,0 +1,4 @@
+provider: github
+owner: nickEatsBread
+repo: hayase
+updaterCacheDirName: hayase-updater

@@ -1,0 +1,18 @@
+{
+  "name": "hayase-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hayase monorepo for local source builds with debrid support",
+  "packageManager": "pnpm@10.28.1",
+  "scripts": {
+    "codecs:install": "node scripts/install-codecs.mjs",
+    "codecs:reinstall": "node scripts/install-codecs.mjs --force",
+    "codecs:restore": "node scripts/install-codecs.mjs --restore",
+    "dev:interface": "pnpm --filter ui dev",
+    "dev:electron": "pnpm --filter hayase dev",
+    "build:electron": "pnpm --filter hayase build",
+    "build:win": "pnpm --filter hayase build:win",
+    "remotes:setup": "bash scripts/setup-remotes.sh",
+    "sync:upstream": "bash scripts/sync-upstream.sh"
+  }
+}

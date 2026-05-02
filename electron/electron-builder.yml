@@ -1,0 +1,170 @@
+appId: com.github.thaunknown.miru
+productName: Hayase
+electronFuses:
+  resetAdHocDarwinSignature: false
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+directories:
+  buildResources: build
+asarUnpack:
+  - resources/**
+  - "**/*.node"
+  - node_modules/**/*.node
+  - "**/node_modules/**/*.node"
+win:
+  executableName: Hayase
+  files:
+    - "!node_modules/**/prebuilds/!(win32*)/*.node"
+    - "!**/.vscode/*"
+    - "!src/*"
+    - "!electron.vite.config.{js,ts,mjs,cjs}"
+    - "!{.eslintignore,.eslintrc.js,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+    - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+    - "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+    - "!node_modules/**/*.{mk,a,o,h,lib,tlog,cpp,c,vcxproj,vcxproj.filters,props,iobj,ipdb,pdb,exp,recipe,bare,map,ts,txt,cts}"
+    - "!node_modules/@thaunknown/yencode/crcutil-1.0/**"
+    - "!node_modules/@thaunknown/yencode/build/**"
+    - "!node_modules/utp-native/build/**"
+    - "!node_modules/utp-native/deps/**"
+    - "!node_modules/**/LICENSE"
+    - "!**/.eslintcache"
+    - "!**/.gitmodules"
+    - "!**/.gitattributes"
+    - "!**/*.md"
+    - "!eslint.config.mjs"
+    - "!electron-dist/*"
+    - "!resources/*"
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # signAndEditExecutable: true
+  verifyUpdateCodeSignature: false
+  artifactName: ${os}-${name}-${version}-installer.${ext}
+nsis:
+  artifactName: ${os}-${name}-${version}-installer.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+  oneClick: false
+  perMachine: true
+  deleteAppDataOnUninstall: true
+  allowToChangeInstallationDirectory: true
+mac:
+  asarUnpack:
+    - resources/**
+  artifactName: ${os}-${name}-${version}-mac.${ext}
+  entitlementsInherit: build/entitlements.mac.plist
+  defaultArch: universal
+  singleArchFiles: "**/node_modules/{utp-native,fs-native-extensions,@thaunknown/yencode}/**/*.node"
+  x64ArchFiles: "**/node_modules/{utp-native,fs-native-extensions,@thaunknown/yencode}/**/*.node"
+  category: public.app-category.video
+  darkModeSupport: true
+  hardenedRuntime: true
+  mergeASARs: false
+  files:
+    - "!node_modules/@paymoapp/electron-shutdown-handler/**/*.node"
+    - "!node_modules/**/prebuilds/!(darwin*)/*.node"
+    - "!**/.vscode/*"
+    - "!src/*"
+    - "!electron.vite.config.{js,ts,mjs,cjs}"
+    - "!{.eslintignore,.eslintrc.js,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+    - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+    - "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+    - "!node_modules/**/*.{mk,a,o,h,lib,tlog,cpp,c,vcxproj,vcxproj.filters,props,iobj,ipdb,pdb,exp,recipe,bare,map,ts,txt,cts}"
+    - "!node_modules/@thaunknown/yencode/crcutil-1.0/**"
+    - "!node_modules/@thaunknown/yencode/build/**"
+    - "!node_modules/utp-native/build/**"
+    - "!node_modules/utp-native/deps/**"
+    - "!node_modules/**/LICENSE"
+    - "!**/.eslintcache"
+    - "!**/.gitmodules"
+    - "!**/.gitattributes"
+    - "!**/*.md"
+    - "!eslint.config.mjs"
+    - "!electron-dist/*"
+    - "!resources/*"
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: true
+  target:
+    - target: default
+      arch:
+        - universal
+linux:
+  artifactName: ${os}-${name}-${version}-linux.${ext}
+  icon: build/icon.icns
+  files:
+    - "!node_modules/**/prebuilds/!(linux*)/*.node"
+    - "!**/.vscode/*"
+    - "!src/*"
+    - "!electron.vite.config.{js,ts,mjs,cjs}"
+    - "!{.eslintignore,.eslintrc.js,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+    - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+    - "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+    - "!node_modules/**/*.{mk,a,o,h,lib,tlog,cpp,c,vcxproj,vcxproj.filters,props,iobj,ipdb,pdb,exp,recipe,bare,map,ts,txt,cts}"
+    - "!node_modules/@thaunknown/yencode/crcutil-1.0/**"
+    - "!node_modules/@thaunknown/yencode/build/**"
+    - "!node_modules/utp-native/build/**"
+    - "!node_modules/utp-native/deps/**"
+    - "!node_modules/**/LICENSE"
+    - "!**/.eslintcache"
+    - "!**/.gitmodules"
+    - "!**/.gitattributes"
+    - "!**/*.md"
+    - "!eslint.config.mjs"
+    - "!electron-dist/*"
+    - "!resources/*"
+  target:
+    - target: deb
+      arch:
+        - x64
+    # - target: pacman
+    #   arch:
+    #     - x64
+    # - target: rpm
+    #   arch:
+    #     - x64
+    - target: AppImage
+      arch:
+        - x64
+  maintainer: ThaUnknown
+  category: AudioVideo;Video
+  desktop:
+    entry:
+      Type: "Application"
+      Encoding: "UTF-8"
+      Name: "Hayase"
+      Comment: "Bittorrent streaming software for cats"
+      Keywords: "anime"
+      Terminal: "false"
+      MimeType: "x-scheme-handler/hayase;"
+npmRebuild: true
+afterPack: ./scripts/after-pack.mjs
+publish:
+  provider: github
+  owner: nickEatsBread
+  repo: hayase
+  releaseType: release
+# electronDist must be set when using a custom Electron build (e.g. with
+# proprietary codecs baked in). For local source builds we use stock Electron
+# from node_modules, so leave this commented out and rely on `pnpm
+# codecs:install` to swap ffmpeg.dll into node_modules/electron/dist/.
+# electronDist: electron-dist
+extraResources:
+  - from: ../interface/build
+    to: ui
+    filter: ['**/*']
+protocols:
+  - name: hayase
+    schemes:
+      - hayase
+electronLanguages:
+  - en-US

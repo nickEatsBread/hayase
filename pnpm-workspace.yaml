@@ -1,0 +1,18 @@
+packages:
+  - 'native'
+  - 'torrent-client'
+  - 'interface'
+  - 'electron'
+
+ignoredBuiltDependencies:
+  - '@paymoapp/electron-shutdown-handler'
+  - '@thaunknown/yencode'
+  - bufferutil
+  - electron
+  - node-datachannel
+  - protobufjs
+  - utf-8-validate
+  - utp-native
+
+onlyBuiltDependencies:
+  - esbuild
