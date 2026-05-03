@@ -189,14 +189,18 @@ jobs:
       # When `git merge --squash` produces conflicts, this step replays the
       # merge (the previous step aborted to keep the worktree clean) and
       # shells out to scripts/ai-resolve-conflicts.mjs to resolve every
-      # conflicted file via Claude Opus through Cloudflare AI Gateway.
-      #
-      # Three auth modes (script picks the best one available):
-      #   - CF Unified Billing: CF_AI_GATEWAY_URL + CF_AI_GATEWAY_TOKEN
-      #     (charged to your Cloudflare credits, no Anthropic key needed)
-      #   - CF BYOK: CF_AI_GATEWAY_URL + ANTHROPIC_API_KEY (charged by
-      #     Anthropic, CF for caching/analytics only)
-      #   - Direct: ANTHROPIC_API_KEY (no CF, no caching)
+      # conflicted file via an LLM. Four auth modes, picked in priority
+      # order from the secrets that exist (override with AI_RESOLVE_MODE
+      # repo variable):
+      #   1. workers-ai     CF_WORKERS_AI_TOKEN + CF_WORKERS_AI_ACCOUNT_ID
+      #                     FREE up to 10k neurons/day (Qwen2.5-Coder-32B
+      #                     by default, configurable via CF_WORKERS_AI_MODEL)
+      #   2. cf-unified     CF_AI_GATEWAY_TOKEN + CF_AI_GATEWAY_URL
+      #                     PAID via Cloudflare credits, gets you Claude Opus
+      #   3. cf-byok        ANTHROPIC_API_KEY + CF_AI_GATEWAY_URL
+      #                     PAID via Anthropic, CF for caching/analytics
+      #   4. direct         ANTHROPIC_API_KEY
+      #                     PAID via Anthropic, no CF
       #
       # If none of these are configured, the step exits cleanly and falls
       # through to the manual-review path in the next step.
@@ -204,15 +208,27 @@ jobs:
         if: steps.selected.outputs.go == 'true' && steps.sync.outputs.result == 'conflict'
         id: ai_resolve
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Workers AI (free tier) - mode 1
+          CF_WORKERS_AI_TOKEN: ${{ secrets.CF_WORKERS_AI_TOKEN }}
+          CF_WORKERS_AI_ACCOUNT_ID: ${{ secrets.CF_WORKERS_AI_ACCOUNT_ID }}
+          CF_WORKERS_AI_MODEL: ${{ vars.CF_WORKERS_AI_MODEL || '@cf/qwen/qwen2.5-coder-32b-instruct' }}
+          # CF AI Gateway (Unified Billing or BYOK) - modes 2/3
           CF_AI_GATEWAY_URL: ${{ secrets.CF_AI_GATEWAY_URL }}
           CF_AI_GATEWAY_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          # Anthropic direct (or via BYOK above) - modes 3/4
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-5' }}
+          # Optional override
+          AI_RESOLVE_MODE: ${{ vars.AI_RESOLVE_MODE }}
         run: |
           set -e
-          # Need at least one of: CF unified billing token, or anthropic key.
-          if [ -z "$CF_AI_GATEWAY_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::notice::No AI auth configured (need CF_AI_GATEWAY_TOKEN for CF credits, or ANTHROPIC_API_KEY for direct/BYOK) - skipping AI resolution"
+          # Need at least one valid auth combo to proceed.
+          HAS_AUTH=0
+          if [ -n "$CF_WORKERS_AI_TOKEN" ] && [ -n "$CF_WORKERS_AI_ACCOUNT_ID" ]; then HAS_AUTH=1; fi
+          if [ -n "$CF_AI_GATEWAY_TOKEN" ] && [ -n "$CF_AI_GATEWAY_URL" ]; then HAS_AUTH=1; fi
+          if [ -n "$ANTHROPIC_API_KEY" ]; then HAS_AUTH=1; fi
+          if [ $HAS_AUTH -eq 0 ]; then
+            echo "::notice::No AI auth configured. Set CF_WORKERS_AI_TOKEN+CF_WORKERS_AI_ACCOUNT_ID (free), or CF_AI_GATEWAY_TOKEN+CF_AI_GATEWAY_URL, or ANTHROPIC_API_KEY - skipping AI resolution"
             echo "result=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -294,9 +310,9 @@ jobs:
         run: |
           REASON="manual review needed"
           case "${{ steps.ai_resolve.outputs.result }}" in
-            ai-failed)  REASON="AI resolution failed (Claude declined or output had remaining conflict markers)" ;;
+            ai-failed)  REASON="AI resolution failed (model declined or output had remaining conflict markers)" ;;
             ai-noop)    REASON="AI resolved conflicts but produced no net changes (likely all hunks were forks-only)" ;;
-            skipped)    REASON="AI resolution skipped (no auth configured - need CF_AI_GATEWAY_TOKEN for CF credits or ANTHROPIC_API_KEY for direct/BYOK)" ;;
+            skipped)    REASON="AI resolution skipped (no auth configured - set CF_WORKERS_AI_TOKEN+CF_WORKERS_AI_ACCOUNT_ID for free Qwen-Coder, or CF_AI_GATEWAY_TOKEN for paid Opus, or ANTHROPIC_API_KEY)" ;;
           esac
 
           cat <<EOF >> "$GITHUB_STEP_SUMMARY"

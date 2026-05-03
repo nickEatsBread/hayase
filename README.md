@@ -181,31 +181,49 @@ bash scripts/sync-upstream.sh all
 
 `.github/workflows/upstream-sync.yml` runs every Monday at 08:00 UTC (and on workflow_dispatch). It tries the same subtree merge for each upstream and opens a PR per package with the changes.
 
-When conflicts happen, the workflow can auto-resolve them via Claude Opus through Cloudflare AI Gateway. The resolution prompt (`scripts/ai-resolve-conflicts.mjs`) is loaded with this fork's exact list of local additions per package, so it knows to preserve debrid types / RPC toggle / settings injection / etc and incorporate any new upstream additions on the same files.
+When conflicts happen, the workflow can auto-resolve them via an LLM. The resolution prompt (`scripts/ai-resolve-conflicts.mjs`) is loaded with this fork's exact list of local additions per package, so it knows to preserve debrid types / RPC toggle / settings injection / etc and incorporate any new upstream additions on the same files.
 
-Three auth modes — pick one. The script picks the most-preferred one based on which secrets exist:
+Four auth modes — pick one. The script picks the most-preferred one based on which secrets exist (override via `AI_RESOLVE_MODE` repo variable):
 
-**Mode 1: Cloudflare Unified Billing (recommended, no Anthropic account needed)**
+**Mode 1: Cloudflare Workers AI (FREE — recommended for cost-sensitive use)**
 
-Charged to your Cloudflare credits. Set up at [Cloudflare AI Gateway](https://dash.cloudflare.com/?to=/:account/ai/ai-gateway):
-1. Create a Gateway in the dashboard
+Truly free up to 10,000 neurons/day (~166 conflict resolutions). Uses Cloudflare's hosted open-weight models — Qwen2.5-Coder-32B by default since it's code-specific. No Anthropic account needed, no per-token cost.
+
+1. Create a Cloudflare API token at [/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with **Workers AI: Read** permission
+2. Find your CF account ID at [dash.cloudflare.com](https://dash.cloudflare.com/) (sidebar shows "Account ID" — 32 hex chars)
+3. Set repo secrets:
+   - `CF_WORKERS_AI_TOKEN` = the API token
+   - `CF_WORKERS_AI_ACCOUNT_ID` = your account ID
+4. (optional) `CF_WORKERS_AI_MODEL` repo variable to switch models — e.g. `@cf/meta/llama-3.3-70b-instruct-fp8-fast` for general use, `@cf/openchat/openchat-3.5-0106` for smaller/faster
+
+Quality caveat: open-weight models follow our "preserve fork additions / incorporate upstream additions" prompt less reliably than Opus. Always verify the AI-resolved PR carefully before merging — if you see fork features dropped or upstream code missing, switch to Mode 2.
+
+**Mode 2: Cloudflare AI Gateway with Unified Billing (PAID — Cloudflare credits)**
+
+Charged to your Cloudflare credits, gets you Claude Opus quality. No Anthropic account needed.
+
+1. Create a Gateway at [Cloudflare AI Gateway](https://dash.cloudflare.com/?to=/:account/ai/ai-gateway)
 2. Top up credits in the "Credits Available" card
-3. Create a Cloudflare API token at [/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with **AI Gateway: Edit** permission
+3. Create a CF API token with **AI Gateway: Edit** permission
 4. Set repo secrets:
    - `CF_AI_GATEWAY_URL` = `https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-name>/anthropic`
    - `CF_AI_GATEWAY_TOKEN` = the API token from step 3
 
-**Mode 2: Cloudflare BYOK (Anthropic billing through CF for caching)**
+**Mode 3: Cloudflare BYOK (PAID — Anthropic billing through CF for caching)**
 
-Charged to your Anthropic account, gets CF's caching/analytics. Set repo secrets:
-- `CF_AI_GATEWAY_URL` = same as above
+Charged to your Anthropic account, gets CF's caching/analytics on top.
+
+- `CF_AI_GATEWAY_URL` = same as Mode 2
 - `ANTHROPIC_API_KEY` = `sk-ant-...` from [console.anthropic.com](https://console.anthropic.com/)
 
-**Mode 3: Direct to Anthropic (no Cloudflare)**
+**Mode 4: Direct to Anthropic (PAID — no Cloudflare)**
 
 Simplest, no caching/analytics. Set repo secret `ANTHROPIC_API_KEY` only.
 
-Optional repo variable: `ANTHROPIC_MODEL` (defaults to `claude-opus-4-5`).
+Optional repo variables:
+- `ANTHROPIC_MODEL` (Modes 2/3/4 — defaults to `claude-opus-4-5`)
+- `CF_WORKERS_AI_MODEL` (Mode 1 — defaults to `@cf/qwen/qwen2.5-coder-32b-instruct`)
+- `AI_RESOLVE_MODE` (force a specific mode — `workers-ai` / `cf-unified` / `cf-byok` / `direct`)
 
 Without any of these configured, the workflow falls back to the manual review path — logs which files would conflict and points you at `pnpm sync:upstream <pkg>` for local resolution.
 
