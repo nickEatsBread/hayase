@@ -183,16 +183,31 @@ bash scripts/sync-upstream.sh all
 
 When conflicts happen, the workflow can auto-resolve them via Claude Opus through Cloudflare AI Gateway. The resolution prompt (`scripts/ai-resolve-conflicts.mjs`) is loaded with this fork's exact list of local additions per package, so it knows to preserve debrid types / RPC toggle / settings injection / etc and incorporate any new upstream additions on the same files.
 
-Required GitHub Actions secrets to enable AI resolution:
+Three auth modes — pick one. The script picks the most-preferred one based on which secrets exist:
 
-| Secret | Required | Source |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | yes | https://console.anthropic.com/ — `sk-ant-...` |
-| `CF_AI_GATEWAY_URL` | optional | https://dash.cloudflare.com/<acct>/ai/ai-gateway — base URL `https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/anthropic` (without trailing `/v1/messages`). If unset the script calls `api.anthropic.com` directly without the gateway's caching/analytics. |
+**Mode 1: Cloudflare Unified Billing (recommended, no Anthropic account needed)**
+
+Charged to your Cloudflare credits. Set up at [Cloudflare AI Gateway](https://dash.cloudflare.com/?to=/:account/ai/ai-gateway):
+1. Create a Gateway in the dashboard
+2. Top up credits in the "Credits Available" card
+3. Create a Cloudflare API token at [/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with **AI Gateway: Edit** permission
+4. Set repo secrets:
+   - `CF_AI_GATEWAY_URL` = `https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-name>/anthropic`
+   - `CF_AI_GATEWAY_TOKEN` = the API token from step 3
+
+**Mode 2: Cloudflare BYOK (Anthropic billing through CF for caching)**
+
+Charged to your Anthropic account, gets CF's caching/analytics. Set repo secrets:
+- `CF_AI_GATEWAY_URL` = same as above
+- `ANTHROPIC_API_KEY` = `sk-ant-...` from [console.anthropic.com](https://console.anthropic.com/)
+
+**Mode 3: Direct to Anthropic (no Cloudflare)**
+
+Simplest, no caching/analytics. Set repo secret `ANTHROPIC_API_KEY` only.
 
 Optional repo variable: `ANTHROPIC_MODEL` (defaults to `claude-opus-4-5`).
 
-Without `ANTHROPIC_API_KEY` set, the workflow falls back to the manual review path — it logs which files would conflict and points you at `pnpm sync:upstream <pkg>` for local resolution.
+Without any of these configured, the workflow falls back to the manual review path — logs which files would conflict and points you at `pnpm sync:upstream <pkg>` for local resolution.
 
 AI-resolved syncs land as PRs titled `[AI] sync PKG from upstream (SHA)` for human review before merging — never merged automatically.
 

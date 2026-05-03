@@ -17,21 +17,39 @@
 //   - The conflict patterns are predictable: most are "we added X near
 //     where they added Y" where both can coexist
 //
-// Cloudflare AI Gateway setup (optional - script falls back to direct
-// api.anthropic.com if CF_AI_GATEWAY_URL isn't set):
-//   1. Create a Gateway at https://dash.cloudflare.com/<acct>/ai/ai-gateway
-//   2. Use BYOK mode with your Anthropic API key
-//   3. Copy the universal endpoint URL: https://gateway.ai.cloudflare.com/
-//      v1/<account_id>/<gateway_id>/anthropic
-//   4. Add as GitHub Actions secret CF_AI_GATEWAY_URL
-//   5. Also add ANTHROPIC_API_KEY (used as x-api-key header when calling
-//      through the gateway - CF Gateway forwards it to Anthropic)
+// Three auth modes, picked in order of preference:
 //
-// Required env:
-//   ANTHROPIC_API_KEY     - your Anthropic key (sk-ant-...)
-// Optional env:
-//   CF_AI_GATEWAY_URL     - Cloudflare AI Gateway base URL (without
-//                           trailing /anthropic - we append /anthropic/v1/messages)
+// 1. CF UNIFIED BILLING (recommended, 2026+) - charged to your Cloudflare
+//    credits, no Anthropic account/key needed.
+//    Setup:
+//      a. Create a Gateway at https://dash.cloudflare.com/<acct>/ai/ai-gateway
+//      b. Top up credits in the Gateway's "Credits Available" card
+//      c. Create a Cloudflare API token with AI Gateway: Edit permission at
+//         https://dash.cloudflare.com/profile/api-tokens
+//      d. Repo secrets:
+//           CF_AI_GATEWAY_URL    https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/anthropic
+//           CF_AI_GATEWAY_TOKEN  the API token from step (c)
+//    Auth header: cf-aig-authorization: Bearer <CF_AI_GATEWAY_TOKEN>
+//    Bill: lands on your Cloudflare invoice + small convenience fee.
+//
+// 2. CF BYOK (caching/analytics, Anthropic billing) - you have an existing
+//    Anthropic agreement and want CF's gateway features without changing
+//    where you're billed.
+//    Setup:
+//      a. Same as above for the gateway URL
+//      b. Repo secrets:
+//           CF_AI_GATEWAY_URL    same as mode 1
+//           ANTHROPIC_API_KEY    sk-ant-... from console.anthropic.com
+//    Auth header: x-api-key: <ANTHROPIC_API_KEY>
+//    Bill: lands on your Anthropic invoice as usual.
+//
+// 3. DIRECT TO ANTHROPIC (no Cloudflare) - simplest, no caching/analytics.
+//    Setup:
+//      a. Repo secret: ANTHROPIC_API_KEY only
+//    Auth header: x-api-key: <ANTHROPIC_API_KEY>
+//    Endpoint: https://api.anthropic.com/v1/messages
+//
+// Optional env (all modes):
 //   ANTHROPIC_MODEL       - model id (default: claude-opus-4-5)
 //   ANTHROPIC_MAX_TOKENS  - max output tokens (default: 32000)
 //
@@ -46,20 +64,51 @@ import { argv, env, exit } from 'node:process'
 
 const ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
 const CF_AI_GATEWAY_URL = env.CF_AI_GATEWAY_URL
+const CF_AI_GATEWAY_TOKEN = env.CF_AI_GATEWAY_TOKEN
 const MODEL = env.ANTHROPIC_MODEL ?? 'claude-opus-4-5'
 const MAX_TOKENS = Number(env.ANTHROPIC_MAX_TOKENS ?? 32000)
 
-if (!ANTHROPIC_API_KEY) {
-  console.error('ai-resolve: ANTHROPIC_API_KEY env var is required')
+// Mode resolution. CF Unified Billing wins if a CF token is present and
+// gateway URL is set - it's the cleanest setup (no third-party billing
+// relationship). BYOK falls back to Anthropic key. Direct-to-Anthropic is
+// last resort with no caching/analytics.
+let MODE          // 'cf-unified' | 'cf-byok' | 'direct'
+let ENDPOINT
+let AUTH_HEADERS
+
+if (CF_AI_GATEWAY_TOKEN) {
+  if (!CF_AI_GATEWAY_URL) {
+    console.error('ai-resolve: CF_AI_GATEWAY_TOKEN requires CF_AI_GATEWAY_URL to also be set')
+    exit(1)
+  }
+  MODE = 'cf-unified'
+  // Cloudflare-Universal endpoint: same path, just routes through CF.
+  ENDPOINT = `${CF_AI_GATEWAY_URL.replace(/\/$/, '')}/v1/messages`
+  // CF identifies us via cf-aig-authorization, no Anthropic key needed.
+  AUTH_HEADERS = {
+    'cf-aig-authorization': `Bearer ${CF_AI_GATEWAY_TOKEN}`,
+    'anthropic-version': '2023-06-01'
+  }
+} else if (ANTHROPIC_API_KEY && CF_AI_GATEWAY_URL) {
+  MODE = 'cf-byok'
+  ENDPOINT = `${CF_AI_GATEWAY_URL.replace(/\/$/, '')}/v1/messages`
+  AUTH_HEADERS = {
+    'x-api-key': ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01'
+  }
+} else if (ANTHROPIC_API_KEY) {
+  MODE = 'direct'
+  ENDPOINT = 'https://api.anthropic.com/v1/messages'
+  AUTH_HEADERS = {
+    'x-api-key': ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01'
+  }
+} else {
+  console.error('ai-resolve: need either (CF_AI_GATEWAY_TOKEN + CF_AI_GATEWAY_URL) for Unified Billing,')
+  console.error('                          (ANTHROPIC_API_KEY + CF_AI_GATEWAY_URL) for BYOK through CF,')
+  console.error('                          or ANTHROPIC_API_KEY alone for direct API.')
   exit(1)
 }
-
-// CF Gateway URL pattern: https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/anthropic
-// Gateway-prefixed endpoint forwards x-api-key + body to Anthropic, returns
-// the same response shape. Direct fallback uses api.anthropic.com.
-const ENDPOINT = CF_AI_GATEWAY_URL
-  ? `${CF_AI_GATEWAY_URL.replace(/\/$/, '')}/v1/messages`
-  : 'https://api.anthropic.com/v1/messages'
 
 // Per-package context: tells Claude what fork-only additions to preserve.
 // Keep these short - they're the "what to NOT lose" cheat sheet.
@@ -145,8 +194,7 @@ async function callClaude (filePath, content, packageName) {
 
   const headers = {
     'content-type': 'application/json',
-    'x-api-key': ANTHROPIC_API_KEY,
-    'anthropic-version': '2023-06-01'
+    ...AUTH_HEADERS
   }
 
   let attempt = 0
@@ -193,7 +241,10 @@ async function resolveOne (filePath, packageName) {
     return { skipped: true }
   }
 
-  console.log(`  ${filePath}: ${content.length} chars -> ${MODEL} via ${CF_AI_GATEWAY_URL ? 'CF AI Gateway' : 'direct API'}`)
+  const modeLabel = MODE === 'cf-unified' ? 'CF AI Gateway (Unified Billing - CF credits)'
+    : MODE === 'cf-byok' ? 'CF AI Gateway (BYOK - Anthropic billing)'
+    : 'Anthropic API direct'
+  console.log(`  ${filePath}: ${content.length} chars -> ${MODEL} via ${modeLabel}`)
 
   const { text, usage } = await callClaude(filePath, content, packageName)
 
@@ -222,6 +273,7 @@ async function main () {
 
   console.log(`AI conflict resolver - package: ${packageName} - files: ${files.length}`)
   console.log(`  Endpoint: ${ENDPOINT}`)
+  console.log(`  Mode:     ${MODE}`)
   console.log(`  Model:    ${MODEL}`)
 
   let resolved = 0

@@ -191,7 +191,14 @@ jobs:
       # shells out to scripts/ai-resolve-conflicts.mjs to resolve every
       # conflicted file via Claude Opus through Cloudflare AI Gateway.
       #
-      # Skipped if ANTHROPIC_API_KEY isn't set in repo secrets - falls
+      # Three auth modes (script picks the best one available):
+      #   - CF Unified Billing: CF_AI_GATEWAY_URL + CF_AI_GATEWAY_TOKEN
+      #     (charged to your Cloudflare credits, no Anthropic key needed)
+      #   - CF BYOK: CF_AI_GATEWAY_URL + ANTHROPIC_API_KEY (charged by
+      #     Anthropic, CF for caching/analytics only)
+      #   - Direct: ANTHROPIC_API_KEY (no CF, no caching)
+      #
+      # If none of these are configured, the step exits cleanly and falls
       # through to the manual-review path in the next step.
       - name: AI-resolve conflicts via Cloudflare AI Gateway
         if: steps.selected.outputs.go == 'true' && steps.sync.outputs.result == 'conflict'
@@ -199,11 +206,13 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CF_AI_GATEWAY_URL: ${{ secrets.CF_AI_GATEWAY_URL }}
+          CF_AI_GATEWAY_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-5' }}
         run: |
           set -e
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::notice::ANTHROPIC_API_KEY secret not set - skipping AI resolution"
+          # Need at least one of: CF unified billing token, or anthropic key.
+          if [ -z "$CF_AI_GATEWAY_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::No AI auth configured (need CF_AI_GATEWAY_TOKEN for CF credits, or ANTHROPIC_API_KEY for direct/BYOK) - skipping AI resolution"
             echo "result=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -287,7 +296,7 @@ jobs:
           case "${{ steps.ai_resolve.outputs.result }}" in
             ai-failed)  REASON="AI resolution failed (Claude declined or output had remaining conflict markers)" ;;
             ai-noop)    REASON="AI resolved conflicts but produced no net changes (likely all hunks were forks-only)" ;;
-            skipped)    REASON="AI resolution skipped (ANTHROPIC_API_KEY secret not set on repo)" ;;
+            skipped)    REASON="AI resolution skipped (no auth configured - need CF_AI_GATEWAY_TOKEN for CF credits or ANTHROPIC_API_KEY for direct/BYOK)" ;;
           esac
 
           cat <<EOF >> "$GITHUB_STEP_SUMMARY"
