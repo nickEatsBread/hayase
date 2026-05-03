@@ -105,7 +105,18 @@ jobs:
         run: pnpm electron:patch
 
       - name: Build Windows installer
-        run: pnpm --filter hayase build:win
+        # GH_TOKEN is required by electron-builder even when not publishing -
+        # it instantiates the GitHub publisher from the publish: block in
+        # electron-builder.yml during config validation. The actual publish
+        # decision honours `--publish never` (or workflow_dispatch context
+        # which doesn't trigger publish anyway). The release job below
+        # uploads artifacts via gh CLI directly.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd electron
+          pnpm exec electron-vite build
+          pnpm exec electron-builder --win --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -165,7 +176,12 @@ jobs:
         run: pnpm electron:patch
 
       - name: Build Linux installers
-        run: pnpm --filter hayase build:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd electron
+          pnpm exec electron-vite build
+          pnpm exec electron-builder --linux --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
