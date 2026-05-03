@@ -128,15 +128,42 @@ The chain: `electron-vite build` → `electron-builder --win` (uses the patched 
 | `latest.yml` | — | autoupdater manifest (sha512 + version) |
 | `win-unpacked/` | ~290 MB | runnable app bundle (`Hayase.exe` + `resources/`) |
 
+## Build for Linux
+
+```bash
+pnpm --filter hayase build:linux
+```
+
+`pnpm electron:patch` works on Linux too — it grabs the upstream `linux-hayase-VERSION-linux.deb` from `api.hayase.watch`, `dpkg-deb -x` extracts it, and swaps the patched `hayase` binary + `libffmpeg.so` + V8 snapshots into `node_modules/electron/dist/`. Same proprietary-codec coverage as the Windows path.
+
+Outputs in `electron/dist/`:
+- `linux-hayase-X.Y.Z-linux.AppImage`
+- `linux-hayase-X.Y.Z-linux.deb`
+- `latest-linux.yml`
+
+## Build via GitHub Actions
+
+`.github/workflows/build.yml` runs the Windows + Linux builds in parallel on push of any `v*` tag:
+
+```bash
+git tag v6.4.82
+git push origin v6.4.82
+# Both jobs run on the matching tag, then a release job aggregates the
+# artifacts and creates a GitHub release.
+```
+
+You can also trigger a test build via the Actions tab (workflow_dispatch). Setting `release: true` on dispatch creates a release using the tag input.
+
+Android isn't covered yet — `capacitor/` depends on nodejs-mobile native modules built via Docker (multi-hour from scratch). A future `android.yml` will pre-build those once and cache the artifacts.
+
 ## Publish a release
 
 The autoupdater is wired to `nickEatsBread/hayase`. To ship a new version:
 
 1. Bump `electron/package.json` version
-2. `pnpm --filter hayase build:win`
-3. `gh release create vX.Y.Z --repo nickEatsBread/hayase dist/win-hayase-X.Y.Z-installer.exe dist/win-hayase-X.Y.Z-installer.exe.blockmap dist/latest.yml --title ... --notes ...`
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` — `.github/workflows/build.yml` builds Windows + Linux installers in parallel and creates the release automatically
 
-Existing v6.4.62+ installs will see the new version on next autoupdater poll.
+Existing v6.4.62+ installs will see the new version on the next autoupdater poll (Windows hits `latest.yml`, Linux hits `latest-linux.yml`).
 
 ## Pull updates from upstream
 
@@ -149,6 +176,25 @@ bash scripts/sync-upstream.sh all
 ```
 
 `sync-upstream.sh` uses `git merge --squash -X subtree=<package>` to remap upstream changes onto the corresponding subdirectory. If a sync conflicts with our local additions (debrid module, RPC toggle, settings injection, etc.) git halts with conflict markers — resolve, `git add`, `git commit`.
+
+### Auto-sync via GitHub Actions
+
+`.github/workflows/upstream-sync.yml` runs every Monday at 08:00 UTC (and on workflow_dispatch). It tries the same subtree merge for each upstream and opens a PR per package with the changes.
+
+When conflicts happen, the workflow can auto-resolve them via Claude Opus through Cloudflare AI Gateway. The resolution prompt (`scripts/ai-resolve-conflicts.mjs`) is loaded with this fork's exact list of local additions per package, so it knows to preserve debrid types / RPC toggle / settings injection / etc and incorporate any new upstream additions on the same files.
+
+Required GitHub Actions secrets to enable AI resolution:
+
+| Secret | Required | Source |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | https://console.anthropic.com/ — `sk-ant-...` |
+| `CF_AI_GATEWAY_URL` | optional | https://dash.cloudflare.com/<acct>/ai/ai-gateway — base URL `https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/anthropic` (without trailing `/v1/messages`). If unset the script calls `api.anthropic.com` directly without the gateway's caching/analytics. |
+
+Optional repo variable: `ANTHROPIC_MODEL` (defaults to `claude-opus-4-5`).
+
+Without `ANTHROPIC_API_KEY` set, the workflow falls back to the manual review path — it logs which files would conflict and points you at `pnpm sync:upstream <pkg>` for local resolution.
+
+AI-resolved syncs land as PRs titled `[AI] sync PKG from upstream (SHA)` for human review before merging — never merged automatically.
 
 ## License
 

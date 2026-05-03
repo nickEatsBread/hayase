@@ -1,0 +1,215 @@
+name: Build cross-platform installers
+
+# Builds the desktop installers (Windows + Linux) and uploads them as
+# release assets. Triggered automatically on `git push` of any tag matching
+# `v*` (release builds) or manually via workflow_dispatch (test builds).
+#
+# What each job does:
+#
+#   build-windows
+#     - windows-latest runner (Server 2022)
+#     - pnpm install --frozen-lockfile
+#     - pnpm electron:patch  -> downloads upstream Hayase NSIS installer
+#       (~90 MB), 7z extracts it twice, swaps Hayase.exe / ffmpeg.dll /
+#       snapshot blobs into node_modules/electron/dist
+#     - pnpm --filter hayase build:win  -> NSIS installer
+#     - artifact: win-hayase-VERSION-installer.exe (+ blockmap + latest.yml)
+#
+#   build-linux
+#     - ubuntu-latest runner
+#     - pnpm install --frozen-lockfile
+#     - pnpm electron:patch  -> downloads upstream Hayase .deb (~90 MB),
+#       dpkg-deb -x extracts it, swaps hayase / libffmpeg.so / blobs into
+#       node_modules/electron/dist
+#     - pnpm --filter hayase build:linux  -> .deb + .AppImage
+#     - artifact: linux-hayase-VERSION-linux.{AppImage,deb} (+ latest-linux.yml)
+#
+#   build-android (deferred, see notes below)
+#     Capacitor wrapper at capacitor/ depends on nodejs-mobile native
+#     modules built via Docker (capacitor/public/nodejs/Dockerfile). That
+#     build is multi-hour from scratch. A first-class Android CI needs:
+#       1. A separate workflow that pre-builds the Docker image and caches
+#          the .node/.so artifacts (run weekly or on-demand)
+#       2. This build workflow downloads those cached artifacts and runs
+#          gradlew assembleRelease
+#     Out of scope for the initial cross-platform CI. Manual builds for
+#     Android still work via `pnpm --filter capacitor build:app` locally
+#     with Docker. TODO: add android.yml as a follow-up.
+#
+#   release
+#     - Aggregates all platform artifacts and creates a GitHub release
+#       on tag-trigger (or workflow_dispatch with release: true)
+#     - Sets the autoupdater bait: latest.yml (win) + latest-linux.yml are
+#       what electron-updater polls for new versions
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create a GitHub release from the built artifacts'
+        type: boolean
+        default: false
+      tag:
+        description: 'Tag name for the release (e.g. v6.4.82) - required if release=true and not pushed via tag'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10.28.1'
+
+jobs:
+  build-windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install patched Electron
+        # Downloads upstream Hayase NSIS installer + extracts the patched
+        # Electron with proprietary_codecs=true Chromium media stack into
+        # node_modules/electron/dist. electron-builder's electronDist
+        # config picks it up.
+        run: pnpm electron:patch
+
+      - name: Build Windows installer
+        run: pnpm --filter hayase build:win
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            electron/dist/win-hayase-*-installer.exe
+            electron/dist/win-hayase-*-installer.exe.blockmap
+            electron/dist/latest.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build Linux .deb + .AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install Linux build dependencies
+        # electron-builder's Linux targets need a few system tools beyond
+        # what's preinstalled. dpkg/p7zip already on ubuntu-latest.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libarchive-tools \
+            rpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install patched Electron
+        # Downloads upstream Hayase .deb + extracts via dpkg-deb -x.
+        # See scripts/install-patched-electron.mjs PLATFORM_CONFIG.linux.
+        run: pnpm electron:patch
+
+      - name: Build Linux installers
+        run: pnpm --filter hayase build:linux
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installers
+          path: |
+            electron/dist/linux-hayase-*.AppImage
+            electron/dist/linux-hayase-*.deb
+            electron/dist/latest-linux.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub release
+    needs: [build-windows, build-linux]
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            if [ -z "$TAG" ]; then
+              echo "::error::release=true requires inputs.tag to be set when not running on a tag"
+              exit 1
+            fi
+            echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"
+          # Flatten the artifacts/ directory tree - gh release create wants
+          # individual files, not directories.
+          shopt -s globstar
+          FILES=()
+          for f in artifacts/**/*; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+
+          # Reuse existing release if it exists (e.g. if we previously did
+          # a partial release via the manual gh CLI workflow); otherwise
+          # create a fresh one.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, uploading additional assets..."
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --title "$TAG" \
+              --notes "Cross-platform CI build of $TAG. See commits since the previous tag for details." \
+              --verify-tag
+          fi
