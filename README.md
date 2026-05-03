@@ -5,6 +5,7 @@ Personal fork of [hayase-app](https://github.com/hayase-app), consolidated into 
 - **Debrid streaming** — Real-Debrid, AllDebrid, Premiumize and TorBox. Configure in **Settings → Client → Debrid** (the section is injected into hayase.app's existing settings page on the fly). When a provider is set, every torrent is resolved via the debrid CDN through a localhost HTTP proxy — no peer-to-peer activity, no upload, no torrenting at all.
 - **Discord RPC master toggle** — full enable/disable switch in **Settings → Interface → Rich Presence Settings**, restoring a feature upstream removed (the old "Show Details" sub-toggle is still there and gets greyed out when the master is off).
 - **Bundled DTS-enabled ffmpeg.dll** — `electron/resources/proprietary-ffmpeg-win32-x64.dll` (4.5 MB) ships H.264, H.265, AAC, AC-3, E-AC-3, MP3, Opus, FLAC, Vorbis, TrueHD **and DTS / DTS-HD** support, so Blu-ray rips with DTS audio actually play. The afterPack hook automatically swaps it into every packaged build.
+- **Patched Electron with proprietary codecs in the Chromium media stack** — stock Electron has `proprietary_codecs=false` baked in, which excludes AC3/EAC3/HEVC from Chromium's HTML5 audio/video allowlist (`media/filters/ffmpeg_glue.cc::kAllowedDecoders`, `media/base/supported_types.cc::IsAudioCodecProprietary()`). Replacement ffmpeg.dlls don't help because the allowlist is checked **before** ffmpeg ever sees the codec. Building Chromium from source with the right GN args takes 4-8 hours and 500 GB. Instead, `pnpm electron:patch` extracts the already-patched Electron binary that upstream Hayase ships in their installer (built from [ThaUnknown/electron-chromium-codecs](https://github.com/ThaUnknown/electron-chromium-codecs)) and swaps it into `node_modules/electron/dist/`. The build pipeline then packages this patched Electron via `electronDist` in `electron-builder.yml`. Result: EAC3/AC3/DTS audio plays natively in `<video>` elements — no more relying on the experimental mediabunny WASM fallback.
 - **Speed-only player stats bar in debrid mode** — peer count and upload speed are hidden via injected CSS while debrid is streaming, since they're meaningless when the bytes come from a CDN.
 
 The main UI itself is loaded from `https://hayase.app/` (matching upstream) so animetosho, MAL linking, YouTube hover trailers and everything else continue to work as upstream intends. The fork's settings panels are injected into the live page via `webContents.executeJavaScript` from the main process — no separate UI is bundled.
@@ -43,6 +44,11 @@ hayase/
 ├── scripts/
 │   ├── install-codecs.mjs     Download + swap proprietary ffmpeg into
 │   │                          node_modules/electron/dist (for dev)
+│   ├── install-patched-electron.mjs
+│   │                          Download upstream Hayase installer + extract
+│   │                          patched electron.exe (proprietary_codecs=true
+│   │                          Chromium media stack — enables AC3/EAC3/HEVC
+│   │                          natively) into node_modules/electron/dist
 │   ├── setup-remotes.sh       Register hayase-app upstreams as remotes
 │   └── sync-upstream.sh       Pull updates from a single upstream
 ├── pnpm-workspace.yaml
@@ -81,6 +87,14 @@ pnpm install
 # includes DTS — falls back to the official Electron release otherwise)
 pnpm codecs:install
 
+# REQUIRED for native EAC3/AC3 playback: extract upstream Hayase's
+# patched Electron (with proprietary_codecs=true Chromium media stack)
+# and substitute it into node_modules/electron/dist. Downloads the
+# upstream installer (~90 MB) and replaces electron.exe + ffmpeg.dll +
+# friends. Re-run after every `pnpm install` since pnpm's electron
+# postinstall re-downloads stock binaries.
+pnpm electron:patch
+
 # register hayase-app upstream remotes for syncing
 bash scripts/setup-remotes.sh
 ```
@@ -105,7 +119,7 @@ pnpm dev:electron
 pnpm --filter hayase build:win
 ```
 
-The chain: `electron-vite build` → `electron-builder --win` → afterPack hook (swaps in the DTS-enabled ffmpeg from `electron/resources/`) → NSIS package. Output lands in `electron/dist/`:
+The chain: `electron-vite build` → `electron-builder --win` (uses the patched Electron from `node_modules/electron/dist/` via the `electronDist` config — make sure `pnpm electron:patch` has been run!) → afterPack hook (swaps in the DTS-enabled ffmpeg from `electron/resources/` as belt-and-suspenders, even though the patched Electron already has it) → NSIS package. Output lands in `electron/dist/`:
 
 | File | Size | What it is |
 |---|---|---|
@@ -143,4 +157,4 @@ Each subdirectory inherits its upstream license:
 - `interface/` — BUSL-1.1 (Business Source License)
 - everything else — see the `LICENSE` file inside each subdirectory
 
-The workspace glue (root files + `scripts/`) is MIT. The bundled `electron/resources/proprietary-ffmpeg-win32-x64.dll` is the same `ffmpeg.dll` upstream Hayase distributes in their public installer.
+The workspace glue (root files + `scripts/`) is MIT. The bundled `electron/resources/proprietary-ffmpeg-win32-x64.dll` is the same `ffmpeg.dll` upstream Hayase distributes in their public installer. `pnpm electron:patch` extracts the patched `electron.exe` from upstream Hayase's signed installer at build time — that binary is the result of compiling Electron with [ThaUnknown/electron-chromium-codecs](https://github.com/ThaUnknown/electron-chromium-codecs) patches applied to Chromium's media stack. We only redistribute it via this fork's installer; rebuilding from source ourselves takes 4-8 hours per release and isn't worthwhile while upstream Hayase keeps publishing freshly-patched binaries.

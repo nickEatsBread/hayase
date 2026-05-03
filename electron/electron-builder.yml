@@ -153,11 +153,25 @@ publish:
   owner: nickEatsBread
   repo: hayase
   releaseType: release
-# electronDist must be set when using a custom Electron build (e.g. with
-# proprietary codecs baked in). For local source builds we use stock Electron
-# from node_modules, so leave this commented out and rely on `pnpm
-# codecs:install` to swap ffmpeg.dll into node_modules/electron/dist/.
-# electronDist: electron-dist
+# Use the Electron from node_modules instead of the cached zip that
+# electron-builder downloads via @electron/get.
+#
+# By default electron-builder fetches its own copy of Electron from the
+# official releases (cached at ~/AppData/Local/electron/Cache/electron-
+# v<ver>-win32-x64.zip on Windows) and packages from THAT, completely
+# ignoring node_modules/electron/dist. This is fine for stock Electron
+# but breaks our setup because `pnpm electron:patch` swaps the upstream-
+# Hayase patched Electron (with proprietary_codecs=true Chromium media
+# stack - AC3/EAC3/HEVC etc) into node_modules/electron/dist. Without
+# electronDist set, the patched binaries never made it into the final
+# build; we got the cached stock Electron instead.
+#
+# Pointing electronDist at node_modules/electron/dist makes the builder
+# package the patched Electron we installed there. The ffmpeg.dll
+# substitution in scripts/after-pack.mjs is now redundant (upstream's
+# patched dist already includes the DTS-enabled ffmpeg) but kept as a
+# belt-and-suspenders for users who skipped `pnpm electron:patch`.
+electronDist: node_modules/electron/dist
 protocols:
   - name: hayase
     schemes:
