@@ -84,8 +84,12 @@
 // Optional env (all modes):
 //   ANTHROPIC_MODEL       - model id for modes 2/3/4 (default: claude-opus-4-5)
 //   CF_WORKERS_AI_MODEL   - model id for mode 1 (default: @cf/qwen/qwen2.5-coder-32b-instruct)
-//   ANTHROPIC_MAX_TOKENS  - max output tokens (default: 32000)
-//   AI_RESOLVE_MODE       - force a specific mode (workers-ai|cf-unified|cf-byok|direct)
+//   ANTHROPIC_MAX_TOKENS    - max output tokens for modes 2/3/4 (default: 32000)
+//   CF_WORKERS_AI_MAX_TOKENS - max output tokens for mode 1 (default: 8000;
+//                              don't set above the model's context window
+//                              minus the input - typical models cap around
+//                              32k-128k total context)
+//   AI_RESOLVE_MODE         - force a specific mode (workers-ai|cf-unified|cf-byok|direct)
 //
 // Usage:
 //   node scripts/ai-resolve-conflicts.mjs <package-name> <file1> <file2> ...
@@ -102,9 +106,24 @@ const CF_AI_GATEWAY_TOKEN = env.CF_AI_GATEWAY_TOKEN
 const CF_WORKERS_AI_TOKEN = env.CF_WORKERS_AI_TOKEN
 const CF_WORKERS_AI_ACCOUNT_ID = env.CF_WORKERS_AI_ACCOUNT_ID
 const ANTHROPIC_MODEL = env.ANTHROPIC_MODEL ?? 'claude-opus-4-5'
-const CF_WORKERS_AI_MODEL = env.CF_WORKERS_AI_MODEL ?? '@cf/qwen/qwen2.5-coder-32b-instruct'
-const MAX_TOKENS = Number(env.ANTHROPIC_MAX_TOKENS ?? 32000)
+// Default Workers AI model: Llama 3.3 70B FP8 fast. 128k context, fast
+// inference, costs ~80 neurons per typical conflict resolution. The
+// previous default Qwen2.5-Coder-32B was code-specific but capped at a
+// 32k context window, which broke on any conflict file > ~30k tokens.
+const CF_WORKERS_AI_MODEL = env.CF_WORKERS_AI_MODEL ?? '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 const FORCED_MODE = env.AI_RESOLVE_MODE // 'workers-ai' | 'cf-unified' | 'cf-byok' | 'direct'
+
+// max_tokens default differs by request shape because model context
+// windows differ wildly:
+//   anthropic:  Opus has 200k context, can comfortably output 32k+ tokens
+//   workers-ai: most CF models have 32-128k context, default to a safer
+//               8k completion to leave headroom for the input
+// Override with ANTHROPIC_MAX_TOKENS or CF_WORKERS_AI_MAX_TOKENS env.
+function defaultMaxTokens (shape) {
+  return shape === 'anthropic'
+    ? Number(env.ANTHROPIC_MAX_TOKENS ?? 32000)
+    : Number(env.CF_WORKERS_AI_MAX_TOKENS ?? 8000)
+}
 
 // Mode resolution. Priority order (first matching wins):
 //   1. workers-ai      - free up to 10k neurons/day
@@ -261,11 +280,13 @@ async function callModel (filePath, content, packageName) {
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE(packageName, PACKAGE_CONTEXT[packageName] ?? 'Unknown package - preserve all distinctive additions on both sides.')
   const userPrompt = `Resolve all conflict markers in this file and output the merged result:\n\n=== ${filePath} ===\n\n${content}`
 
+  const maxTokens = defaultMaxTokens(REQUEST_SHAPE)
+
   let body
   if (REQUEST_SHAPE === 'anthropic') {
     body = JSON.stringify({
       model: MODEL,
-      max_tokens: MAX_TOKENS,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }]
     })
@@ -277,7 +298,7 @@ async function callModel (filePath, content, packageName) {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      max_tokens: MAX_TOKENS,
+      max_tokens: maxTokens,
       temperature: 0.1,
       stream: false
     })
