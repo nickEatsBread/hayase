@@ -48,6 +48,25 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'https', privileges: { standard: true, bypassCSP: true, allowServiceWorkers: true, supportFetchAPI: true, corsEnabled: false, stream: true, codeCache: true, secure: true } }
 ])
 
+// Hostnames used by debrid providers' CDN endpoints. Responses from these
+// hosts get their Content-Type rewritten so the <video> element can stream
+// the file inline instead of being told to download it.
+const DEBRID_CDN_RX = /(\.real-debrid\.com|\.alldebrid\.com|\.premiumize\.me|\.torbox\.app)\//i
+
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  mkv: 'video/x-matroska',
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  webm: 'video/webm',
+  avi: 'video/x-msvideo',
+  mov: 'video/quicktime',
+  wmv: 'video/x-ms-wmv',
+  flv: 'video/x-flv',
+  ts: 'video/mp2t',
+  mpg: 'video/mpeg',
+  mpeg: 'video/mpeg'
+}
+
 function setCors (record?: Record<string, string[]>, credentails = false) {
   if (!record) return
   if (record['access-control-allow-origin'] ?? record['Access-Control-Allow-Origin']) return
@@ -200,6 +219,26 @@ export default class App {
           details.statusLine = '200 OK'
           details.statusCode = 200
         }
+      }
+
+      // Debrid CDNs (Real-Debrid, AllDebrid, Premiumize, TorBox) serve video
+      // files with `Content-Type: application/force-download` and
+      // `Content-Disposition: attachment` to push browsers into download mode.
+      // The <video> element refuses to start playback under those headers
+      // and gets stuck on the loading spinner. Rewrite to a real video MIME
+      // (based on the file extension in the URL) and strip the disposition
+      // so the player can stream inline.
+      if (details.responseHeaders && DEBRID_CDN_RX.test(details.url)) {
+        const ext = (() => {
+          try { return new URL(details.url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1] } catch { return null }
+        })()
+        const mime = ext && VIDEO_MIME_BY_EXT[ext]
+        if (mime) {
+          details.responseHeaders['content-type'] = [mime]
+          delete details.responseHeaders['Content-Type']
+        }
+        delete details.responseHeaders['content-disposition']
+        delete details.responseHeaders['Content-Disposition']
       }
 
       callback(details)
