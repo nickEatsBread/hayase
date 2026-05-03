@@ -11,34 +11,6 @@ import type { PROVIDERS } from 'torrent-client/doh'
 
 ipcRenderer.send('preload-done')
 
-// Force-enable hayase.app's mediabunny player backend BEFORE the page's
-// settings store loads. mediabunny includes JS decoders for AC3/EAC3
-// (via @mediabunny/ac3) which bypass Chromium's HTML5 audio allowlist
-// entirely - that allowlist excludes AC3/EAC3 because stock Electron's
-// Chromium build sets `proprietary_codecs=false` at compile time.
-//
-// The setting is `bunnyPlayer`, persisted via svelte-persisted-store
-// under localStorage key 'settings'. We just need to set it to true
-// before the page initialises its store.
-//
-// Upstream gates this behind a dev-mode toggle (Settings -> Player ->
-// 'EXPERIMENTAL: Custom Player Backend') because mediabunny is newer
-// and might have edge cases. In our build we default it on so users
-// don't have to dig through dev tools to play modern releases.
-try {
-  const raw = localStorage.getItem('settings')
-  let settings: Record<string, unknown> = {}
-  if (raw) {
-    try { settings = JSON.parse(raw) as Record<string, unknown> } catch { settings = {} }
-  }
-  if (settings.bunnyPlayer !== true) {
-    settings.bunnyPlayer = true
-    localStorage.setItem('settings', JSON.stringify(settings))
-  }
-} catch {
-  // localStorage might not be ready yet for non-page contexts; ignore.
-}
-
 const torrent = new Promise<Remote<TorrentClient>>(resolve => {
   ipcRenderer.once('port', ({ ports }) => {
     if (!ports[0]) return
