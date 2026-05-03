@@ -125,50 +125,31 @@ export default new class Attachments {
   // requests against the upstream debrid URL) so the existing _metadata /
   // attachments / tracks / subtitle / chapters methods all work the same
   // way they do for torrents.
-  //
-  // Also kicks off a background read of the entire file from byte 0 piped
-  // through metadata.parseStream. This is what fires 'subtitle' events as
-  // playback progresses - subtitle BlockGroups live inside cluster sections
-  // scattered throughout the file, NOT in the header, so we need a steady
-  // stream of bytes from the start to extract them. This effectively double-
-  // downloads the file (once for metadata, once for the player), which is
-  // the trade-off for getting live subtitle events from a CDN that only
-  // exposes random-access HTTP.
   registerDebrid (debridUrl: string, hash: string, id: number, name: string, size: number) {
     if (!name.endsWith('.mkv') && !name.endsWith('.webm')) return
     const key = hash + id
     const file = new DebridFile(debridUrl, name, size) as unknown as File & EventEmitter
     this.filemap.set(key, file)
     this.debridUrlToKey.set(debridUrl, key)
-    this._startBackgroundParse(file).catch(err => console.error('[debrid bg parse]', err))
   }
 
-  // Token for the currently-active background parse. Held so that registering
-  // a new debrid file cancels any prior in-flight parse before starting a
-  // new one (otherwise an old episode's parse would keep eating bandwidth).
-  #activeParseToken: object | null = null
-
-  async _startBackgroundParse (file: File & EventEmitter) {
-    const token = {}
-    this.#activeParseToken = token
-    const metadata = this.metadatamap.get(file) ?? new Metadata(file) as Metadata & EventEmitter
-    if (!this.metadatamap.has(file)) this.metadatamap.set(file, metadata)
-    const it = (file as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]()
-    try {
-      const wrapped = metadata.parseStream(it as unknown as AsyncIterable<Uint8Array>) as AsyncIterable<Uint8Array>
-      for await (const _ of wrapped) {
-        if (this.destroyed) return
-        if (this.#activeParseToken !== token) return // cancelled by a newer playback
-      }
-    } catch (err) {
-      if ((err as Error & { name?: string }).name !== 'AbortError') {
-        console.error('[debrid bg parse] error', err)
-      }
-    } finally {
-      // Make sure the underlying generator (which holds the AbortController)
-      // gets a chance to clean up its fetch when we exit the loop early.
-      try { await (it as { return?: () => Promise<unknown> }).return?.() } catch {}
+  // Called by the proxy as the player streams bytes for a debrid URL.
+  // Returns a parseStream-wrapped iterable that the proxy pipes to the
+  // client; matroska-metadata sees the playback bytes inline so it can fire
+  // 'subtitle' events as the player progresses through the file. This is
+  // the same single byte stream used for video playback - no extra CDN
+  // connection (which would get rate-limited by Real-Debrid).
+  feedDebrid (debridUrl: string, iterator: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array> {
+    const key = this.debridUrlToKey.get(debridUrl)
+    if (!key) return iterator
+    const file = this.filemap.get(key)
+    if (!file) return iterator
+    let metadata = this.metadatamap.get(file)
+    if (!metadata) {
+      metadata = new Metadata(file) as Metadata & EventEmitter
+      this.metadatamap.set(file, metadata)
     }
+    try { return (metadata.parseStream(iterator) ?? iterator) as AsyncIterable<Uint8Array> } catch { return iterator }
   }
 
   async attachments (hash: string, id: number) {

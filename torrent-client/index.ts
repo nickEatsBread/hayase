@@ -221,7 +221,12 @@ export default class TorrentClient {
   [doh]: DoHResolver | undefined
   [debrid]: DebridProvider | null = null;
   [debridProxy]: Server | null = null;
-  [debridStats]: DebridStats | null = null
+  [debridStats]: DebridStats | null = null;
+  // Set of upstream debrid URLs that have already had their initial
+  // sequential stream tee'd through matroska-metadata. Subsequent range
+  // requests for the same URL bypass parseStream (it's stateful and would
+  // break on mid-file bytes).
+  #debridStreamingForUrl = new Set<string>()
 
   attachments = attachments
 
@@ -509,6 +514,7 @@ export default class TorrentClient {
     // doesn't bleed into this one.
     this.attachments.filemap.clear()
     this.attachments.debridUrlToKey.clear()
+    this.#debridStreamingForUrl.clear()
 
     return files.map((file, id) => {
       // Register MKV/WebM files for matroska-metadata parsing so the player
@@ -624,12 +630,36 @@ export default class TorrentClient {
         }
       })
 
-      // Just stream the bytes to the player. attachments.registerDebrid()
-      // already kicked off a separate background parseStream from byte 0
-      // for live subtitle events, so the proxy doesn't need to tee bytes
-      // through matroska-metadata here (which would have conflicted with
-      // the background parser anyway).
-      upstreamRes.pipe(res)
+      // For the player's initial sequential read from byte 0 we tee the
+      // bytes through matroska-metadata.parseStream so live 'subtitle'
+      // events fire as clusters arrive. Same byte stream - no extra CDN
+      // connection (Real-Debrid rate-limits per-file concurrent
+      // connections, and a parallel background download was triggering
+      // 502s on the player's range requests).
+      //
+      // We mark the URL as "first-stream-consumed" after this so subsequent
+      // seek requests bypass parseStream entirely (parseStream is stateful
+      // and would choke on mid-file bytes).
+      const reqRange = String(req.headers.range ?? '')
+      const isInitialFullStream = !reqRange || reqRange === 'bytes=0-' || /^bytes=0-\d/.test(reqRange)
+      const alreadyTeed = this.#debridStreamingForUrl.has(upstream)
+      if (isInitialFullStream && !alreadyTeed) {
+        this.#debridStreamingForUrl.add(upstream)
+        const wrapped = this.attachments.feedDebrid(upstream, this._streamToAsyncIterable(upstreamRes))
+        ;(async () => {
+          try {
+            for await (const chunk of wrapped) {
+              if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
+            }
+          } catch (e) {
+            console.error('[debrid-proxy] tee stream error', e)
+          } finally {
+            res.end()
+          }
+        })()
+      } else {
+        upstreamRes.pipe(res)
+      }
     })
 
     upstreamReq.on('error', err => {
@@ -638,6 +668,14 @@ export default class TorrentClient {
     })
     req.on('close', () => upstreamReq.destroy())
     upstreamReq.end()
+  }
+
+  // Convert a Node IncomingMessage to an AsyncIterable<Uint8Array> for
+  // matroska-metadata's parseStream.
+  async * _streamToAsyncIterable (stream: IncomingMessage): AsyncIterable<Uint8Array> {
+    for await (const chunk of stream) {
+      yield chunk as Uint8Array
+    }
   }
 
 
