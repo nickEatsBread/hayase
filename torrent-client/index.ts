@@ -242,12 +242,7 @@ export default class TorrentClient {
   [doh]: DoHResolver | undefined
   [debrid]: DebridProvider | null = null;
   [debridProxy]: Server | null = null;
-  [debridStats]: DebridStats | null = null;
-  // Set of upstream debrid URLs that have already had their initial
-  // sequential stream tee'd through matroska-metadata. Subsequent range
-  // requests for the same URL bypass parseStream (it's stateful and would
-  // break on mid-file bytes).
-  #debridStreamingForUrl = new Set<string>()
+  [debridStats]: DebridStats | null = null
 
   attachments = attachments
 
@@ -535,7 +530,6 @@ export default class TorrentClient {
     // doesn't bleed into this one.
     this.attachments.filemap.clear()
     this.attachments.debridUrlToKey.clear()
-    this.#debridStreamingForUrl.clear()
 
     return files.map((file, id) => {
       // Register MKV/WebM files for matroska-metadata parsing so the player
@@ -656,36 +650,36 @@ export default class TorrentClient {
         }
       })
 
-      // For the player's initial sequential read from byte 0 we tee the
-      // bytes through matroska-metadata.parseStream so live 'subtitle'
-      // events fire as clusters arrive. Same byte stream - no extra CDN
-      // connection (Real-Debrid rate-limits per-file concurrent
-      // connections, and a parallel background download was triggering
-      // 502s on the player's range requests).
+      // Tee EVERY upstream response through matroska-metadata.parseStream
+      // so live 'subtitle' events fire from any cluster bytes the player
+      // happens to fetch. mediabunny doesn't always start with
+      // bytes=0- for cluster reads - the actual cluster sections of the
+      // file are at much higher offsets (12+ MB into the file in typical
+      // anime MKVs). The previous version only tee'd bytes=0- requests
+      // which just contain the EBML header (no clusters, no subtitles).
       //
-      // We mark the URL as "first-stream-consumed" after this so subsequent
-      // seek requests bypass parseStream entirely (parseStream is stateful
-      // and would choke on mid-file bytes).
-      const reqRange = String(req.headers.range ?? '')
-      const isInitialFullStream = !reqRange || reqRange === 'bytes=0-' || /^bytes=0-\d/.test(reqRange)
-      const alreadyTeed = this.#debridStreamingForUrl.has(upstream)
-      if (isInitialFullStream && !alreadyTeed) {
-        this.#debridStreamingForUrl.add(upstream)
-        const wrapped = this.attachments.feedDebrid(upstream, this._streamToAsyncIterable(upstreamRes))
-        ;(async () => {
-          try {
-            for await (const chunk of wrapped) {
-              if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
-            }
-          } catch (e) {
-            console.error('[debrid-proxy] tee stream error', e)
-          } finally {
-            res.end()
+      // parseStream is built for this case: with stable=false it scans
+      // incoming chunks for the Cluster marker (0x1F43B675) and starts
+      // parsing once found. Concurrent calls share metadata state but
+      // each call captures its own currentClusterTimecode locally so
+      // there's no race between them. Parsing overhead per chunk is a
+      // few microseconds - negligible vs network.
+      const wrapped = this.attachments.feedDebrid(upstream, this._streamToAsyncIterable(upstreamRes))
+      ;(async () => {
+        try {
+          for await (const chunk of wrapped) {
+            if (res.writableEnded || res.destroyed) break
+            if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
           }
-        })()
-      } else {
-        upstreamRes.pipe(res)
-      }
+        } catch (e) {
+          // upstream aborted (player closed range request) - normal.
+          if ((e as Error & { code?: string })?.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+            // Silence noisy expected aborts.
+          }
+        } finally {
+          if (!res.writableEnded) try { res.end() } catch {}
+        }
+      })()
     })
 
     upstreamReq.on('error', err => {
