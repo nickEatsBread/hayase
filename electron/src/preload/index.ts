@@ -49,6 +49,13 @@ const native: Partial<Native> = {
   },
   toggleDiscordDetails: (bool: boolean) => main.toggleDiscordDetails(bool),
   toggleDiscordRPC: (bool: boolean) => main.toggleDiscordRPC(bool),
+  // Fork-only APIs used by the settings cards we inject into hayase.app's
+  // existing settings pages. Exposed here so the injected scripts can call
+  // them without needing their own preload.
+  openExtras: () => main.openExtras(),
+  getExtras: () => main.getExtras(),
+  setExtras: (extras: Parameters<typeof main.applyExtras>[0]) => main.applyExtras(extras),
+  testDebridKey: (provider: Parameters<typeof main.checkDebridKey>[0], apiKey: string) => main.checkDebridKey(provider, apiKey),
   setMediaSession: async (metadata, id) => {
     navigator.mediaSession.metadata = new MediaMetadata({ title: metadata.title, artist: metadata.description, artwork: [{ src: metadata.image }] })
     await main.setMediaSession(metadata, id)

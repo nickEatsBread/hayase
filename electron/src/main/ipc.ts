@@ -158,6 +158,13 @@ export default class IPC {
     this.discord.setEnabled(enabled)
   }
 
+  // Open the Hayase+ Extras settings window. Called from the floating
+  // button injected into hayase.app's UI (and the tray menu).
+  async openExtras () {
+    const { openExtrasWindow } = await import('./extras-window.ts')
+    openExtrasWindow(this)
+  }
+
   // Read the persisted Hayase+ extras settings (debrid + RPC toggles).
   getExtras () {
     return store.get('extras')
