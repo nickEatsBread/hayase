@@ -6,6 +6,57 @@ import networkAddress from 'network-address'
 import type EventEmitter from 'node:events'
 import type { AddressInfo } from 'node:net'
 
+// Minimal File-like that matroska-metadata can parse via its
+// `file[Symbol.asyncIterator]({ start })` interface (the same shape
+// WebTorrent's File exposes when slice() isn't available - see
+// matroska-metadata/src/util.js getFileStream()). Each iteration issues
+// a Range request to the upstream debrid CDN starting at the requested
+// byte offset, so getSegment / getSeekHead / getTracks / getAttachments
+// / getChapters all work without ever buffering the full file locally.
+class DebridFile {
+  name: string
+  size: number
+  url: string
+  // Matches WebTorrent's File API field. matroska-metadata reads `size`
+  // (used to compute timecode windows in some paths).
+  get length () { return this.size }
+
+  constructor (url: string, name: string, size: number) {
+    this.url = url
+    this.name = name
+    this.size = size
+  }
+
+  async * [Symbol.asyncIterator] (opts: { start?: number, end?: number } = {}): AsyncGenerator<Uint8Array, void, void> {
+    const start = opts.start ?? 0
+    const range = opts.end != null ? `bytes=${start}-${opts.end}` : `bytes=${start}-`
+    // matroska-metadata frequently reads only the first few KB looking for a
+    // specific EBML tag and then stops iterating. We need to abort the fetch
+    // when that happens so the debrid CDN doesn't keep streaming gigabytes
+    // we'll never read. Async generator's `finally` runs on early
+    // `return()` (which `for-await-of` calls implicitly on break/return).
+    const controller = new AbortController()
+    try {
+      const res = await fetch(this.url, {
+        headers: {
+          range,
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+          accept: '*/*'
+        },
+        redirect: 'follow',
+        signal: controller.signal
+      })
+      if (!res.ok && res.status !== 206) throw new Error(`Debrid file fetch failed: ${res.status} for ${this.url}`)
+      if (!res.body) return
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        yield chunk
+      }
+    } finally {
+      controller.abort()
+    }
+  }
+}
+
 export default new class Attachments {
   destroyed = false
   filemap = new Map<string, File & EventEmitter>()
@@ -69,14 +120,16 @@ export default new class Attachments {
   // matroska-metadata for the registered file.
   debridUrlToKey = new Map<string, string>()
 
-  // Called by torrent-client when starting a debrid playback. We register a
-  // fake File-like so the existing _metadata / attachments / tracks /
-  // subtitle / chapters methods all work the same way they do for torrents.
-  registerDebrid (debridUrl: string, hash: string, id: number, name: string) {
+  // Called by torrent-client when starting a debrid playback. Registers a
+  // DebridFile (a minimal async-iterable File-like that issues HTTP Range
+  // requests against the upstream debrid URL) so the existing _metadata /
+  // attachments / tracks / subtitle / chapters methods all work the same
+  // way they do for torrents.
+  registerDebrid (debridUrl: string, hash: string, id: number, name: string, size: number) {
     if (!name.endsWith('.mkv') && !name.endsWith('.webm')) return
     const key = hash + id
-    const fake = Object.assign(Object.create(null) as Record<string, unknown>, { name }) as unknown as File & EventEmitter
-    this.filemap.set(key, fake)
+    const file = new DebridFile(debridUrl, name, size) as unknown as File & EventEmitter
+    this.filemap.set(key, file)
     this.debridUrlToKey.set(debridUrl, key)
   }
 

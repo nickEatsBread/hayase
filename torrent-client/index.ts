@@ -514,7 +514,7 @@ export default class TorrentClient {
       // Register MKV/WebM files for matroska-metadata parsing so the player
       // gets audio tracks, subtitle tracks, attachments (fonts) and
       // chapters - same as it would when playing via WebTorrent.
-      this.attachments.registerDebrid(file.url, fakeHash, id, file.name)
+      this.attachments.registerDebrid(file.url, fakeHash, id, file.name, file.size)
       return {
         hash: fakeHash,
         name: file.name,
