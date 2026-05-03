@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, writeFile, statfs, unlink, mkdir, readdir, access, constants } from 'node:fs/promises'
-import { createServer as createHttpServer, request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from 'node:http'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { join } from 'node:path'
 import { exit } from 'node:process'
 import querystring from 'querystring'
@@ -113,6 +113,27 @@ const debrid = Symbol('debrid')
 const debridProxy = Symbol('debridProxy')
 const debridStats = Symbol('debridStats')
 const tracker = new HTTPTracker({}, atob('aHR0cDovL255YWEudHJhY2tlci53Zjo3Nzc3L2Fubm91bmNl'))
+
+// Keep-alive HTTP(S) agents for the debrid CDN proxy. Without these every
+// range request opens a fresh TCP+TLS connection (~200ms handshake each)
+// which adds up to seconds of latency over a single playback session.
+// maxSockets=8 leaves room for parallel chunk fetches that mediabunny
+// makes for the seekhead + multiple cluster reads.
+const debridUpstreamHttpsAgent = new HttpsAgent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 8,
+  // Real-Debrid CDN supports HTTP/2 but Node's https module is HTTP/1.1
+  // only. With keep-alive enabled this is still much better than fresh
+  // connections per request.
+  scheduling: 'lifo'
+})
+const debridUpstreamHttpAgent = new HttpAgent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 8,
+  scheduling: 'lifo'
+})
 
 const VIDEO_MIME_BY_EXT: Record<string, string> = {
   mkv: 'video/x-matroska',
@@ -585,11 +606,15 @@ export default class TorrentClient {
 
     const parsed = new URL(upstream)
     const lib = parsed.protocol === 'https:' ? httpsRequest : httpRequest
+    const agent = parsed.protocol === 'https:' ? debridUpstreamHttpsAgent : debridUpstreamHttpAgent
     const headers: Record<string, string> = {
       // Forward range so the player can seek; everything else gets a clean
       // Chrome-ish UA so debrid CDNs don't reject us.
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-      accept: '*/*'
+      accept: '*/*',
+      // Explicit keep-alive for the upstream so the CDN doesn't close the
+      // socket between range reads (matches what the agent will do anyway).
+      connection: 'keep-alive'
     }
     if (req.headers.range) headers.range = String(req.headers.range)
 
@@ -599,7 +624,8 @@ export default class TorrentClient {
       port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
       path: parsed.pathname + parsed.search,
       method: req.method ?? 'GET',
-      headers
+      headers,
+      agent
     }, upstreamRes => {
       const ext = (parsed.pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? '').toLowerCase()
       const mime = VIDEO_MIME_BY_EXT[ext] ?? upstreamRes.headers['content-type'] ?? 'application/octet-stream'
@@ -663,10 +689,27 @@ export default class TorrentClient {
     })
 
     upstreamReq.on('error', err => {
-      console.error('[debrid-proxy] upstream error', err)
-      try { res.writeHead(502, { 'access-control-allow-origin': '*' }); res.end(String(err)) } catch {}
+      // ECONNRESET / socket hang up on `destroy()` are expected when we
+      // abort upstream after the player closes its range request - silence
+      // those, only log unexpected ones.
+      const code = (err as Error & { code?: string }).code
+      if (code !== 'ECONNRESET' && code !== 'ERR_STREAM_PREMATURE_CLOSE' && !req.destroyed && !res.writableEnded) {
+        console.error('[debrid-proxy] upstream error', err)
+        try { res.writeHead(502, { 'access-control-allow-origin': '*' }); res.end(String(err)) } catch {}
+      }
     })
-    req.on('close', () => upstreamReq.destroy())
+
+    // Aggressively tear down the upstream socket the moment the player
+    // disconnects, otherwise the CDN keeps streaming gigabytes we'll never
+    // forward (Real-Debrid serves `bytes=N-` as N-to-EOF, which can be
+    // 16+ GB per request - the v6.4.71 HAR showed a single request taking
+    // 22 seconds because we kept consuming bytes after the player aborted).
+    const abortUpstream = () => {
+      try { upstreamReq.destroy() } catch {}
+    }
+    req.once('close', abortUpstream)
+    req.once('aborted', abortUpstream)
+    res.once('close', abortUpstream)
     upstreamReq.end()
   }
 
