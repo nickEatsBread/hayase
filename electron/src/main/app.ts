@@ -83,7 +83,14 @@ export default class App {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: true,
-      enableBlinkFeatures: 'FluentOverlayScrollbars,FluentOverlayScrollbar',
+      // AudioVideoTracks exposes HTMLMediaElement.audioTracks / videoTracks
+      // (off by default in Chromium since 2018) so multi-track MKVs from
+      // hayase.app's player show their audio tracks in the picker. Note that
+      // even with the API exposed, the Chromium HTML5 video pipeline does
+      // not actually re-decode when track.enabled flips - real audio track
+      // switching requires the experimental mediabunny backend (Settings →
+      // Player → "EXPERIMENTAL: Custom Player Backend", visible only in dev).
+      enableBlinkFeatures: 'FluentOverlayScrollbars,FluentOverlayScrollbar,AudioVideoTracks',
       backgroundThrottling: true
     }
   })

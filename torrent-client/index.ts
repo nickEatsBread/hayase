@@ -624,30 +624,12 @@ export default class TorrentClient {
         }
       })
 
-      // Feed bytes through matroska-metadata so audio/subtitle tracks,
-      // attachments (fonts), chapters and live subtitle events all work for
-      // debrid-streamed MKVs - just like WebTorrent playback. We only do
-      // this when the player is reading from byte 0 (the initial sequential
-      // playback request); seeks and parallel range fetches would feed the
-      // parser arbitrary mid-file bytes and confuse it.
-      const reqRange = String(req.headers.range ?? '')
-      const isInitialFullStream = !reqRange || reqRange === 'bytes=0-' || reqRange.startsWith('bytes=0-,') || /^bytes=0-\d/.test(reqRange)
-      if (isInitialFullStream) {
-        const wrapped = this.attachments.feedDebrid(upstream, this._streamToAsyncIterable(upstreamRes))
-        ;(async () => {
-          try {
-            for await (const chunk of wrapped) {
-              if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
-            }
-          } catch (e) {
-            console.error('[debrid-proxy] stream error', e)
-          } finally {
-            res.end()
-          }
-        })()
-      } else {
-        upstreamRes.pipe(res)
-      }
+      // Just stream the bytes to the player. attachments.registerDebrid()
+      // already kicked off a separate background parseStream from byte 0
+      // for live subtitle events, so the proxy doesn't need to tee bytes
+      // through matroska-metadata here (which would have conflicted with
+      // the background parser anyway).
+      upstreamRes.pipe(res)
     })
 
     upstreamReq.on('error', err => {
@@ -658,13 +640,6 @@ export default class TorrentClient {
     upstreamReq.end()
   }
 
-  // Convert a Node IncomingMessage to an AsyncIterable<Uint8Array> for
-  // matroska-metadata's parseStream.
-  async * _streamToAsyncIterable (stream: IncomingMessage): AsyncIterable<Uint8Array> {
-    for await (const chunk of stream) {
-      yield chunk as Uint8Array
-    }
-  }
 
   async _toDebridSource (id: string | ArrayBufferView): Promise<{ source: { kind: 'magnet', value: string } | { kind: 'torrent', value: Uint8Array }, hash: string }> {
     if (typeof id === 'string') {
