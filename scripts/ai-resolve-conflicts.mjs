@@ -390,13 +390,33 @@ async function resolveOne (filePath, packageName) {
     return { failed: true, reason }
   }
 
-  if (text.includes('<<<<<<<') || text.includes('=======\n') || text.includes('>>>>>>>')) {
-    console.log(`    AI output still contains conflict markers - rejecting`)
+  // Strip markdown code fences. The system prompt says not to use them
+  // but open-weight models (Qwen-Coder, Llama) habitually wrap code
+  // responses in ```typescript ... ``` regardless. Detect and unwrap.
+  let cleaned = text.trim()
+  const fenceMatch = cleaned.match(/^```[a-zA-Z0-9_+-]*\n([\s\S]*?)\n```\s*$/)
+  if (fenceMatch) {
+    cleaned = fenceMatch[1]
+    console.log('    (stripped markdown code fences from response)')
+  } else if (cleaned.startsWith('```')) {
+    // Single-fence-only case (model started a fence but didn't close it
+    // properly or the content runs to EOF). Remove leading fence line.
+    const firstNewline = cleaned.indexOf('\n')
+    if (firstNewline !== -1) {
+      cleaned = cleaned.slice(firstNewline + 1)
+    }
+    // Trim trailing fence if present
+    cleaned = cleaned.replace(/\n?```\s*$/, '')
+    console.log('    (stripped leading markdown fence from response)')
+  }
+
+  if (cleaned.includes('<<<<<<<') || cleaned.includes('=======\n') || cleaned.includes('>>>>>>>')) {
+    console.log('    AI output still contains conflict markers - rejecting')
     return { failed: true, reason: 'output contained conflict markers' }
   }
 
-  writeFileSync(filePath, text, 'utf8')
-  console.log(`    resolved (${text.length} chars; tokens in=${usage?.input_tokens} out=${usage?.output_tokens})`)
+  writeFileSync(filePath, cleaned, 'utf8')
+  console.log(`    resolved (${cleaned.length} chars; tokens in=${usage?.input_tokens} out=${usage?.output_tokens})`)
   return { resolved: true, usage }
 }
 
