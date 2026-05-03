@@ -4,6 +4,9 @@ import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 
 import { defineConfig } from 'electron-vite'
+import { glob } from 'glob'
+import license from 'rollup-plugin-license'
+import { cjsInterop } from 'vite-plugin-cjs-interop'
 
 const requireFromHere = createRequire(import.meta.url)
 
@@ -27,9 +30,6 @@ function resolvePackageRoot (name: string): string {
 function resolveInsidePackage (name: string, subpath: string): string {
   return resolve(resolvePackageRoot(name), subpath)
 }
-import { glob } from 'glob'
-import license from 'rollup-plugin-license'
-import { cjsInterop } from 'vite-plugin-cjs-interop'
 
 const electronUnzipPlugin = () => {
   return {
