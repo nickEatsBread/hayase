@@ -10,6 +10,8 @@
   import TextNode from './TextNode.svelte'
 
   import type { Media } from '$lib/modules/anilist'
+  import type { FullMedia } from '$lib/modules/anilist/queries'
+  import type { FragmentOf } from 'gql.tada'
 
   import { client } from '$lib/modules/anilist'
 
@@ -36,16 +38,16 @@
   function getLayoutedElements (_nodes: Node[], _edges: Edge[]) {
     const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}))
     g.setGraph({ rankdir: 'LR', edgesep: 50, nodesep: 50, ranksep: 120, ranker: 'tight-tree' })
-    // TODO: switch between longest-path and tight-tree based on number of nodes?
 
     _edges.forEach((edge) => g.setEdge(edge.source, edge.target))
-    _nodes.forEach((node) =>
+    _nodes.forEach((node) => {
+      const media = node.data.media as FragmentOf<typeof FullMedia>
       g.setNode(node.id, {
         ...node,
-        width: node.measured?.width ?? 120,
-        height: node.measured?.height ?? 32
+        width: node.measured?.width ?? 180,
+        height: node.measured?.height ?? 48.6 + Math.ceil((media.title?.userPreferred?.length ?? 1) / 20) * 19.2
       })
-    )
+    })
 
     Dagre.layout(g)
 

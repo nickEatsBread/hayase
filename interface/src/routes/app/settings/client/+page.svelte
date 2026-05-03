@@ -9,8 +9,6 @@
   import native from '$lib/modules/native'
   import { settings, SUPPORTS } from '$lib/modules/settings'
 
-  import type { DebridProviderId } from 'native'
-
   async function selectDownloadFolder (type?: string) {
     try {
       $settings.torrentPath = await native.selectDownload(type as 'cache' | 'internal' | 'sdcard' | undefined)
@@ -26,38 +24,6 @@
     internal: 'Internal Storage',
     sdcard: 'SD Card'
   } as const
-
-  const debridProviders: Record<DebridProviderId, string> = {
-    none: 'Disabled (use BitTorrent)',
-    realdebrid: 'Real-Debrid',
-    alldebrid: 'AllDebrid',
-    premiumize: 'Premiumize',
-    torbox: 'TorBox'
-  }
-
-  const debridApiPages: Partial<Record<DebridProviderId, string>> = {
-    realdebrid: 'https://real-debrid.com/apitoken',
-    alldebrid: 'https://alldebrid.com/apikeys/',
-    premiumize: 'https://www.premiumize.me/account',
-    torbox: 'https://torbox.app/settings'
-  }
-
-  let testing = false
-  async function testDebrid () {
-    testing = true
-    try {
-      const status = await native.checkDebrid($settings.debridProvider, $settings.debridApiKey)
-      toast.success(`${debridProviders[status.provider]} authenticated`, {
-        description: `${status.user}${status.premium ? ' (premium)' : ' - free account, may have limited functionality'}${status.expiration ? ` until ${new Date(status.expiration).toLocaleDateString()}` : ''}`
-      })
-    } catch (error) {
-      toast.error('Debrid authentication failed', {
-        description: error instanceof Error ? error.message : 'Unknown error occurred.'
-      })
-    } finally {
-      testing = false
-    }
-  }
 </script>
 
 <div class='font-weight-bold text-xl font-bold'>Security Settings</div>
@@ -116,29 +82,3 @@
 <SettingCard let:id title='Disable PeX' description='Disables Peer Exchange for use in private trackers to improve privacy. Might greatly reduce the amount of discovered peers.'>
   <Switch {id} bind:checked={$settings.torrentPeX} />
 </SettingCard>
-
-<div class='font-weight-bold text-xl font-bold'>Debrid Service</div>
-<SettingCard let:id title='Debrid Provider' description='Stream torrents through a debrid service instead of peer-to-peer. Debrid services download the torrent on their servers and give you a high-speed HTTP link, which avoids the need to torrent locally and bypasses ISP throttling. Requires a paid account with the chosen provider.'>
-  <SingleCombo {id} bind:value={$settings.debridProvider} items={debridProviders} class='w-64 shrink-0 border-input border' />
-</SettingCard>
-{#if $settings.debridProvider !== 'none'}
-  <SettingCard let:id title='Debrid API Key' description='Your API token from {debridProviders[$settings.debridProvider]}. Stored locally only.'>
-    <div class='flex w-full sm:w-auto'>
-      <Input
-        {id}
-        type='password'
-        autocomplete='off'
-        bind:value={$settings.debridApiKey}
-        placeholder='paste your API key here'
-        class='sm:w-80 bg-background rounded-r-none' />
-      <Button class='rounded-l-none font-bold' on:click={testDebrid} disabled={testing || !$settings.debridApiKey} variant='secondary'>
-        {testing ? 'Testing…' : 'Test Key'}
-      </Button>
-    </div>
-  </SettingCard>
-  {#if debridApiPages[$settings.debridProvider]}
-    <SettingCard title='Get an API Key' description={`Open ${debridProviders[$settings.debridProvider]}'s API key page to generate or copy your token.`}>
-      <Button class='font-bold' on:click={() => native.openURL(debridApiPages[$settings.debridProvider]!)} variant='secondary'>Open Provider</Button>
-    </SettingCard>
-  {/if}
-{/if}

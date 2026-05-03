@@ -1,11 +1,10 @@
-class AudioStreamProcessor extends AudioWorkletProcessor {
+registerProcessor('audio-stream-processor', class AudioStreamProcessor extends AudioWorkletProcessor {
   _chunks: Array<{ channelData: Float32Array[], length: number }> = []
   _offset = 0
   _samplesConsumed = 0
   _reportInterval = Math.round(sampleRate * 0.1) // report every ~100ms
   constructor () {
     super()
-
     this.port.onmessage = ({ data }) => {
       if (data.type === 'push') {
         this._chunks.push({ channelData: data.channelData, length: data.channelData[0].length })
@@ -17,7 +16,7 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process (_inputs: Float32Array[][], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean {
+  process (_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     try {
       const out = outputs[0]!
       const blockSize = out[0]?.length ?? 128
@@ -54,6 +53,4 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
 
     return true
   }
-}
-
-registerProcessor('audio-stream-processor', AudioStreamProcessor)
+})

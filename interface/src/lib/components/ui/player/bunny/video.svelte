@@ -15,7 +15,7 @@
     ])
 
     if (!ac3) await import('@mediabunny/ac3').then(({ registerAc3Decoder }) => registerAc3Decoder())
-    if (!flac) await import('./flac').then(({ registerFlacDecoder }) => registerFlacDecoder())
+    if (!flac || SUPPORTS.isIOS) await import('./flac').then(({ registerFlacDecoder }) => registerFlacDecoder())
   }
 </script>
 
@@ -32,6 +32,7 @@
   import type { TorrentFile } from 'native'
   import type { SvelteMediaTimeRange } from 'svelte/elements'
 
+  import { customDoubleClick } from '$lib/modules/navigate'
   import { settings } from '$lib/modules/settings'
 
   class DummyTrack implements Track {
@@ -97,12 +98,6 @@
     }
   }
 
-  // async function * mapAsyncGenerator <T, U> (generator: AsyncIterable<T, void, unknown>, map: (t: T) => U): AsyncGenerator<U, void, unknown> {
-  //   for await (const item of generator) {
-  //     yield map(item)
-  //   }
-  // }
-
   function clamp (value: number, min = 0, max = Number.MAX_SAFE_INTEGER) {
     return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min)) || 0
   }
@@ -145,6 +140,7 @@
     loadedmetadata: undefined
     timeupdate: undefined
     fallback: Error
+    dblclick: MouseEvent
   }>()
 
   let lastSyncPaused = paused
@@ -218,18 +214,6 @@
     }
 
     return playbackTimeAtStart
-  }
-
-  async function waitForBackendAudioHeadroom () {
-    await new Promise<void>((resolve) => {
-      const id = setInterval(() => {
-        const bufferedSeconds = (samplesSent - samplesConsumed) / audioCtx!.sampleRate
-        if (bufferedSeconds < 2) {
-          clearInterval(id)
-          resolve()
-        }
-      }, 100)
-    })
   }
 
   function presentBackendFrame (frame: VideoSample) {
@@ -317,16 +301,20 @@
     const selectedVideo = playbackVideoTracks.find(track => `${track.id}` === selectedVideoId) ?? playbackVideoTracks[0]!
     const selectedAudio = playbackAudioTracks.find(track => `${track.id}` === selectedAudioId) ?? playbackAudioTracks[0]
 
+    selectedAudioId = selectedAudio?.id.toString()
+    selectedVideoId = selectedVideo.id.toString()
+
     const sampleRate = await selectedAudio?.getSampleRate()
 
     if (!audioCtx || !gain || (audioCtx.sampleRate !== sampleRate)) {
       await audioCtx?.close()
-      audioCtx = new AudioContext({ sampleRate })
-      gain = audioCtx.createGain()
-      gain.connect(audioCtx.destination)
-      await audioCtx.audioWorklet.addModule(audioWorkletUrl)
+      const ctx = audioCtx = SUPPORTS.isIOS ? new AudioContext() : new AudioContext({ sampleRate })
+      gain = ctx.createGain()
+      gain.connect(ctx.destination)
+      await ctx.audioWorklet.addModule(audioWorkletUrl)
+      if (audioCtx !== ctx) return
 
-      workletNode = new AudioWorkletNode(audioCtx, 'audio-stream-processor', {
+      workletNode = new AudioWorkletNode(ctx, 'audio-stream-processor', {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [await selectedAudio?.getNumberOfChannels() ?? 2]
@@ -354,7 +342,10 @@
     if (initial) dispatch('loadedmetadata')
     readyState = 1
 
-    if (!paused) await play()
+    if (!paused) {
+      lastSyncPaused = true
+      await play()
+    }
 
     if (initial) dispatch('loadeddata')
   }
@@ -425,8 +416,9 @@
 
     if (!rafHandle) loop()
 
+    const currentAsyncId = asyncId
     for await (const { buffer } of audioBufferIterator) {
-      if (paused) break
+      if (paused || asyncId !== currentAsyncId) break
 
       const frames = buffer.length
       const channelData = Array.from({ length: buffer.numberOfChannels }, (_, c) => {
@@ -435,16 +427,30 @@
         return arr
       })
 
+      const data = { type: 'push', channelData, srcRate: buffer.sampleRate } as const
+
       if (SUPPORTS.isIOS) {
-        workletNode!.port.postMessage({ type: 'push', channelData })
+        workletNode!.port.postMessage(data)
       } else {
-        workletNode!.port.postMessage({ type: 'push', channelData }, channelData.map(a => a.buffer))
+        workletNode!.port.postMessage(data, channelData.map(a => a.buffer))
       }
 
       samplesSent += frames
 
       const bufferedSeconds = (samplesSent - samplesConsumed) / audioCtx.sampleRate
-      if (bufferedSeconds >= 2) await waitForBackendAudioHeadroom()
+      if (bufferedSeconds >= 2) {
+        // eslint-disable-next-line @typescript-eslint/no-loop-func
+        await new Promise<void>((resolve) => {
+          const id = setInterval(() => {
+            if (asyncId !== currentAsyncId) return
+            const bufferedSeconds = (samplesSent - samplesConsumed) / (audioCtx?.sampleRate ?? 1)
+            if (bufferedSeconds < 2) {
+              clearInterval(id)
+              resolve()
+            }
+          }, 100)
+        })
+      }
     }
   }
 
@@ -603,7 +609,7 @@
       if (!subtitles) return
 
       await subtitles.jassub?.ready
-      subtitles.jassub?.manualRender(meta)
+      subtitles?.jassub?.manualRender(meta)
 
       handle = requestVideoFrameCallback(loop)
     }
@@ -613,6 +619,7 @@
     return {
       destroy () {
         subtitles?.destroy()
+        subtitles = undefined
         cancelVideoFrameCallback(handle)
       }
     }
@@ -621,6 +628,7 @@
 
 <canvas
   use:holdToFF={'pointer'}
+  use:customDoubleClick={{ condition: SUPPORTS.isIOS, cb: e => dispatch('dblclick', e) }}
   bind:this={canvas}
   bind:clientWidth
   bind:clientHeight

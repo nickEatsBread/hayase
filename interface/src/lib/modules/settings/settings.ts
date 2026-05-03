@@ -63,15 +63,12 @@ const torrentSettings = derivedDeep(settings, ($settings) => ({
   maxConns: $settings.maxConns,
   torrentPort: $settings.torrentPort,
   dhtPort: $settings.dhtPort,
-  torrentPeX: $settings.torrentPeX,
-  debridProvider: $settings.debridProvider,
-  debridApiKey: $settings.debridApiKey
+  torrentPeX: $settings.torrentPeX
 }))
 
 const hideToTray = derived(settings, $settings => $settings.hideToTray)
 const idleAnimation = derived(settings, $settings => $settings.idleAnimation)
 const uiScale = derived(settings, $settings => $settings.uiScale)
-const enableRPC = derived(settings, $settings => $settings.enableRPC)
 const showDetailsInRPC = derived(settings, $settings => $settings.showDetailsInRPC)
 const angle = derived(settings, $settings => $settings.angle)
 
@@ -84,7 +81,6 @@ torrentSettings.subscribe(native.updateSettings)
 hideToTray.subscribe(native.setHideToTray)
 idleAnimation.subscribe(native.transparency)
 uiScale.subscribe(native.setZoom)
-enableRPC.subscribe(native.toggleDiscordRPC)
 showDetailsInRPC.subscribe(native.toggleDiscordDetails)
 angle.subscribe(native.setAngle)
 dohSettings.subscribe(({ enableDoH, doHURL }) => {

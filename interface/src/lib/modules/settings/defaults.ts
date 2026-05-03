@@ -1,7 +1,6 @@
 import SUPPORTS from './supports'
 
 import type { languageCodes, subtitleResolutions, videoResolutions } from './util'
-import type { DebridProviderId } from 'native'
 
 export default {
   volume: 1,
@@ -29,7 +28,6 @@ export default {
   enableDoH: false,
   hideToTray: false,
   doHURL: 'https://cloudflare-dns.com/dns-query',
-  enableRPC: true,
   showDetailsInRPC: true,
   showNavigation: false,
   torrentPath: '',
@@ -46,7 +44,5 @@ export default {
   showHentai: false,
   hideSpoilers: false,
   unsafeWebGPU: false,
-  bunnyPlayer: SUPPORTS.isIOS,
-  debridProvider: 'none' as DebridProviderId,
-  debridApiKey: ''
+  bunnyPlayer: SUPPORTS.isIOS
 }

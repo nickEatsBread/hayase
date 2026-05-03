@@ -42,12 +42,9 @@
 </script>
 
 {#if !SUPPORTS.isAndroid && !SUPPORTS.isIOS}
-  <div class='font-weight-bold text-xl font-bold'>Rich Presence Settings</div>
-  <SettingCard let:id title='Enable Discord Rich Presence' description='Shows your Hayase activity in your Discord profile. Turn this off to disconnect from Discord entirely - nothing will be sent.'>
-    <Switch {id} bind:checked={$settings.enableRPC} />
-  </SettingCard>
-  <SettingCard let:id title='Show Details in Discord Rich Presence' description='Shows currently played anime and episode in Discord rich presence. Has no effect when Discord Rich Presence is disabled.'>
-    <Switch {id} bind:checked={$settings.showDetailsInRPC} disabled={!$settings.enableRPC} />
+  <div class='font-weight-bold text-xl font-bold'>Rich Pressence Settings</div>
+  <SettingCard let:id title='Show Details in Discord Rich Presence' description='Shows currently played anime and episode in Discord rich presence.'>
+    <Switch {id} bind:checked={$settings.showDetailsInRPC} />
   </SettingCard>
 {/if}
 <!-- <SettingCard let:id title='CSS Variables' description='Used for custom themes. Can change colors, sizes, spacing and more. Supports only variables.'>
