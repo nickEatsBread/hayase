@@ -48,25 +48,6 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'https', privileges: { standard: true, bypassCSP: true, allowServiceWorkers: true, supportFetchAPI: true, corsEnabled: false, stream: true, codeCache: true, secure: true } }
 ])
 
-// Hostnames used by debrid providers' CDN endpoints. Responses from these
-// hosts get their Content-Type rewritten so the <video> element can stream
-// the file inline instead of being told to download it.
-const DEBRID_CDN_RX = /(\.real-debrid\.com|\.alldebrid\.com|\.premiumize\.me|\.torbox\.app)\//i
-
-const VIDEO_MIME_BY_EXT: Record<string, string> = {
-  mkv: 'video/x-matroska',
-  mp4: 'video/mp4',
-  m4v: 'video/mp4',
-  webm: 'video/webm',
-  avi: 'video/x-msvideo',
-  mov: 'video/quicktime',
-  wmv: 'video/x-ms-wmv',
-  flv: 'video/x-flv',
-  ts: 'video/mp2t',
-  mpg: 'video/mpeg',
-  mpeg: 'video/mpeg'
-}
-
 function setCors (record?: Record<string, string[]>, credentails = false) {
   if (!record) return
   if (record['access-control-allow-origin'] ?? record['Access-Control-Allow-Origin']) return
@@ -221,25 +202,11 @@ export default class App {
         }
       }
 
-      // Debrid CDNs (Real-Debrid, AllDebrid, Premiumize, TorBox) serve video
-      // files with `Content-Type: application/force-download` and
-      // `Content-Disposition: attachment` to push browsers into download mode.
-      // The <video> element refuses to start playback under those headers
-      // and gets stuck on the loading spinner. Rewrite to a real video MIME
-      // (based on the file extension in the URL) and strip the disposition
-      // so the player can stream inline.
-      if (details.responseHeaders && DEBRID_CDN_RX.test(details.url)) {
-        const ext = (() => {
-          try { return new URL(details.url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1] } catch { return null }
-        })()
-        const mime = ext && VIDEO_MIME_BY_EXT[ext]
-        if (mime) {
-          details.responseHeaders['content-type'] = [mime]
-          delete details.responseHeaders['Content-Type']
-        }
-        delete details.responseHeaders['content-disposition']
-        delete details.responseHeaders['Content-Disposition']
-      }
+      // (Note: debrid stream proxying happens in torrent-client's local
+      // HTTP server now, not in webRequest, since mediabunny fetches via
+      // CORS-mode fetch() which can fail before onHeadersReceived has a
+      // chance to add ACAO. The proxy returns clean responses from
+      // localhost so all that is moot.)
 
       callback(details)
     })
@@ -493,8 +460,38 @@ export default class App {
           else if (path.endsWith('/app/settings/interface')) injectRpcMaster().catch(() => undefined)
         }
 
+        // Inject a <style> rule that hides the peer count + upload speed
+        // pieces of the player stats bar when debrid is active. The bar
+        // (interface/src/lib/components/ui/player/downloadstats.svelte) is
+        // three flex divs - one per icon. We use :has() on the lucide
+        // icon class to drop the seeders and upload siblings, leaving the
+        // download speed pill on its own.
+        function ensureDebridStyle () {
+          if (document.getElementById('hayase-debrid-style')) return
+          const style = document.createElement('style')
+          style.id = 'hayase-debrid-style'
+          style.textContent = \`
+            body[data-debrid-active] div.flex.items-center:has(> svg.lucide-users),
+            body[data-debrid-active] div.flex.items-center:has(> svg.lucide-chevron-up) {
+              display: none !important;
+            }
+          \`
+          document.head?.appendChild(style)
+        }
+        async function syncDebridFlag () {
+          ensureDebridStyle()
+          try {
+            const ex = await get()
+            const active = !!ex && ex.debridProvider && ex.debridProvider !== 'none'
+            if (active) document.body?.setAttribute('data-debrid-active', '1')
+            else document.body?.removeAttribute('data-debrid-active')
+          } catch {}
+        }
+
         new MutationObserver(tick).observe(document.documentElement, { childList: true, subtree: true })
         tick()
+        syncDebridFlag()
+        setInterval(syncDebridFlag, 4000)
       })()
     `
     const inject = () => this.mainWindow.webContents.executeJavaScript(HAYASE_INJECT).catch(() => undefined)

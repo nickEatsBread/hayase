@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, writeFile, statfs, unlink, mkdir, readdir, access, constants } from 'node:fs/promises'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { join } from 'node:path'
 import { exit } from 'node:process'
 import querystring from 'querystring'
@@ -27,7 +29,7 @@ import { createNZB } from './nzb.ts'
 import type { PROVIDERS } from './doh'
 import type { MediaInformation } from 'chromecast-caf-receiver/cast.framework.messages'
 import type { DebridProviderId, DebridStatus, LibraryEntry, PeerInfo, TorrentFile, TorrentInfo, TorrentSettings } from 'native'
-import type { Server } from 'node:http'
+import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type Torrent from 'webtorrent/lib/torrent.js'
 
@@ -108,7 +110,35 @@ const opts = Symbol('opts')
 const tmp = Symbol('tmp')
 const doh = Symbol('doh')
 const debrid = Symbol('debrid')
+const debridProxy = Symbol('debridProxy')
+const debridStats = Symbol('debridStats')
 const tracker = new HTTPTracker({}, atob('aHR0cDovL255YWEudHJhY2tlci53Zjo3Nzc3L2Fubm91bmNl'))
+
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  mkv: 'video/x-matroska',
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  webm: 'video/webm',
+  avi: 'video/x-msvideo',
+  mov: 'video/quicktime',
+  wmv: 'video/x-ms-wmv',
+  flv: 'video/x-flv',
+  ts: 'video/mp2t',
+  mpg: 'video/mpeg',
+  mpeg: 'video/mpeg'
+}
+
+interface DebridStats {
+  name: string
+  size: number
+  downloaded: number
+  // bytes downloaded since the last sample, used to compute speed
+  windowStart: number
+  windowBytes: number
+  // last computed speed (bytes/sec) and when we computed it
+  lastSpeed: number
+  lastSpeedAt: number
+}
 
 class Store {
   cacheFolder
@@ -189,7 +219,9 @@ export default class TorrentClient {
   [opts]: Record<string, unknown>;
   [tmp]: string
   [doh]: DoHResolver | undefined
-  [debrid]: DebridProvider | null = null
+  [debrid]: DebridProvider | null = null;
+  [debridProxy]: Server | null = null;
+  [debridStats]: DebridStats | null = null
 
   attachments = attachments
 
@@ -456,6 +488,23 @@ export default class TorrentClient {
 
     const fakeHash = (hash || files[0]?.url || `${provider.id}-${mediaID}-${episode}`).slice(0, 40).padEnd(40, '0')
 
+    // Track download stats for the largest (likely main video) file so the
+    // UI can show real bytes/s during playback.
+    const main = [...files].sort((a, b) => b.size - a.size)[0]
+    if (main) {
+      this[debridStats] = {
+        name: main.name,
+        size: main.size,
+        downloaded: 0,
+        windowStart: Date.now(),
+        windowBytes: 0,
+        lastSpeed: 0,
+        lastSpeedAt: 0
+      }
+    }
+
+    const proxyPort = this._ensureDebridProxy()
+
     return files.map((file, id) => ({
       hash: fakeHash,
       name: file.name,
@@ -463,9 +512,116 @@ export default class TorrentClient {
       size: file.size,
       path: file.path,
       id,
-      url: file.url,
-      lan: file.url
+      url: this._buildDebridProxyUrl('localhost', proxyPort, file.url, file.name),
+      lan: this._buildDebridProxyUrl(networkAddress(), proxyPort, file.url, file.name)
     }))
+  }
+
+  // Spin up a tiny localhost HTTP server that forwards range requests to the
+  // debrid CDN with sensible Content-Type / CORS headers. We need this
+  // because the renderer's mediabunny player fetches the URL with CORS mode,
+  // and debrid CDNs serve files with `application/force-download` and no
+  // `Access-Control-Allow-Origin` header - so the browser blocks the
+  // response with ERR_FAILED before MSE can decode anything.
+  _ensureDebridProxy (): number {
+    if (this[debridProxy]) return (this[debridProxy].address() as AddressInfo).port
+    const srv = createHttpServer((req, res) => this._handleDebridProxy(req, res))
+    srv.listen(0, '127.0.0.1')
+    this[debridProxy] = srv
+    return (srv.address() as AddressInfo).port
+  }
+
+  _buildDebridProxyUrl (host: string, port: number, debridUrl: string, fileName: string): string {
+    // Encode the upstream URL as base64url in the path so the renderer's
+    // request URL still ends in the right extension (mediabunny sniffs ext).
+    const encoded = Buffer.from(debridUrl, 'utf8').toString('base64url')
+    return `http://${host}:${port}/${encoded}/${encodeURIComponent(fileName)}`
+  }
+
+  _handleDebridProxy (req: IncomingMessage, res: ServerResponse) {
+    // CORS preflight - mediabunny's UrlSource sometimes preflights.
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400'
+      })
+      res.end()
+      return
+    }
+
+    const reqUrl = req.url ?? '/'
+    const firstSlash = reqUrl.indexOf('/', 1)
+    const encoded = reqUrl.slice(1, firstSlash > 0 ? firstSlash : undefined)
+    let upstream: string
+    try {
+      upstream = Buffer.from(encoded, 'base64url').toString('utf8')
+      // Validate it's a real URL we'd be willing to proxy.
+      const parsed = new URL(upstream)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad protocol')
+    } catch {
+      res.writeHead(400)
+      res.end('bad upstream url')
+      return
+    }
+
+    const parsed = new URL(upstream)
+    const lib = parsed.protocol === 'https:' ? httpsRequest : httpRequest
+    const headers: Record<string, string> = {
+      // Forward range so the player can seek; everything else gets a clean
+      // Chrome-ish UA so debrid CDNs don't reject us.
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+      accept: '*/*'
+    }
+    if (req.headers.range) headers.range = String(req.headers.range)
+
+    const upstreamReq = lib({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: req.method ?? 'GET',
+      headers
+    }, upstreamRes => {
+      const ext = (parsed.pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? '').toLowerCase()
+      const mime = VIDEO_MIME_BY_EXT[ext] ?? upstreamRes.headers['content-type'] ?? 'application/octet-stream'
+
+      const outHeaders: Record<string, string | string[]> = {
+        'content-type': Array.isArray(mime) ? mime[0]! : mime,
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+        'access-control-allow-headers': '*',
+        'access-control-expose-headers': 'content-length, content-range, accept-ranges',
+        'accept-ranges': 'bytes',
+        'cache-control': 'no-cache'
+      }
+      // Pass through length / range / etag.
+      for (const k of ['content-length', 'content-range', 'last-modified', 'etag']) {
+        const v = upstreamRes.headers[k]
+        if (v != null) outHeaders[k] = Array.isArray(v) ? v[0]! : v
+      }
+
+      res.writeHead(upstreamRes.statusCode ?? 502, outHeaders)
+
+      // Track bytes for the stats overlay.
+      const stats = this[debridStats]
+      upstreamRes.on('data', chunk => {
+        if (stats) {
+          stats.downloaded += chunk.length
+          stats.windowBytes += chunk.length
+        }
+      })
+
+      upstreamRes.pipe(res)
+    })
+
+    upstreamReq.on('error', err => {
+      console.error('[debrid-proxy] upstream error', err)
+      try { res.writeHead(502, { 'access-control-allow-origin': '*' }); res.end(String(err)) } catch {}
+    })
+    req.on('close', () => upstreamReq.destroy())
+    upstreamReq.end()
   }
 
   async _toDebridSource (id: string | ArrayBufferView): Promise<{ source: { kind: 'magnet', value: string } | { kind: 'torrent', value: Uint8Array }, hash: string }> {
@@ -661,16 +817,49 @@ export default class TorrentClient {
     await createNZB(torrent, url, domain, port, login, password, poolSize)
   }
 
-  async torrentInfo (id: string) {
+  async torrentInfo (id: string): Promise<TorrentInfo> {
     const torrent = await this[client].get(id)
-    if (!torrent) throw new Error('Torrent not found')
-    return this.makeStats(torrent)
+    if (torrent) return this.makeStats(torrent)
+    // Debrid playback path: no real torrent, fabricate stats from the
+    // proxy's byte counter so the UI's speed/progress bar reflects
+    // actual debrid download throughput.
+    const stats = this[debridStats]
+    if (stats) return this._makeDebridStats(id, stats)
+    throw new Error('Torrent not found')
+  }
+
+  _makeDebridStats (id: string, stats: DebridStats): TorrentInfo {
+    const now = Date.now()
+    // Recompute speed once per ~1s window so the value is responsive but
+    // not jittery.
+    if (now - stats.windowStart >= 1000 || stats.lastSpeedAt === 0) {
+      const elapsed = (now - stats.windowStart) / 1000
+      stats.lastSpeed = elapsed > 0 ? Math.round(stats.windowBytes / elapsed) : 0
+      stats.lastSpeedAt = now
+      stats.windowStart = now
+      stats.windowBytes = 0
+    }
+    return {
+      hash: id,
+      name: stats.name,
+      peers: { seeders: 0, leechers: 0, wires: 0 },
+      progress: stats.size ? Math.min(stats.downloaded / stats.size, 1) : 0,
+      speed: { down: stats.lastSpeed, up: 0 },
+      size: { downloaded: stats.downloaded, uploaded: 0, total: stats.size },
+      time: { remaining: stats.lastSpeed > 0 ? (stats.size - stats.downloaded) / stats.lastSpeed : 0, elapsed: 0 },
+      pieces: { total: 0, size: 0 }
+    }
   }
 
   async peerInfo (id: string) {
     const torrent = await this[client].get(id)
 
-    if (!torrent) throw new Error('Torrent not found')
+    // No peers when streaming via debrid - return empty list cleanly so
+    // hayase.app's peer list panel doesn't error out.
+    if (!torrent) {
+      if (this[debridStats]) return []
+      throw new Error('Torrent not found')
+    }
     const peers: PeerInfo[] = torrent.wires.map(wire => {
       const flags: Array<'incoming' | 'outgoing' | 'utp' | 'encrypted'> = []
 
@@ -727,7 +916,13 @@ export default class TorrentClient {
 
   async fileInfo (id: string) {
     const torrent = await this[client].get(id)
-    if (!torrent) throw new Error('Torrent not found')
+    if (!torrent) {
+      if (this[debridStats]) {
+        const s = this[debridStats]
+        return [{ name: s.name, size: s.size, progress: s.size ? s.downloaded / s.size : 0, selections: 1 }]
+      }
+      throw new Error('Torrent not found')
+    }
     return torrent.files.map(({ name, length, progress, _iterators }) => ({
       name,
       size: length,
@@ -738,7 +933,12 @@ export default class TorrentClient {
 
   async protocolStatus (id: string) {
     const torrent = await this[client].get(id)
-    if (!torrent) throw new Error('Torrent not found')
+    if (!torrent) {
+      if (this[debridStats]) {
+        return { dht: false, lsd: false, pex: false, nat: false, forwarding: false, persisting: false, streaming: true }
+      }
+      throw new Error('Torrent not found')
+    }
     return {
       dht: !!this[client].dhtPort,
       lsd: !!torrent.discovery?.lsd?.server,
@@ -813,7 +1013,8 @@ export default class TorrentClient {
       this.chromecasts.destroy(),
       this.dlnas.destroy(),
       new Promise(resolve => this[client].destroy(resolve)),
-      new Promise(resolve => tracker.destroy(resolve))
+      new Promise(resolve => tracker.destroy(resolve)),
+      this[debridProxy] ? new Promise<void>(resolve => this[debridProxy]!.close(() => resolve())) : Promise.resolve()
     ])
     this[doh]?.destroy()
     exit()
