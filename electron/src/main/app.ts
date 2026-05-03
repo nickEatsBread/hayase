@@ -523,139 +523,70 @@ export default class App {
         setInterval(syncDebridFlag, 4000)
       })()
     `
-    // Bunny player A/V sync fix.
+    // Auto-disable the mediabunny player toggle in localStorage.
     //
-    // Upstream hayase.app's mediabunny player (interface/src/lib/components/
-    // ui/player/bunny/video.svelte) computes the current playback time as:
-    //   playbackTimeAtStart + (audioCtx.currentTime - contextStart - baseLatency)
-    // and uses that to time when video frames get presented. The bug:
-    // audioCtx.currentTime is a wall clock - it advances at real-time even
-    // when the audio worklet's chunk queue is starved (slow decode, network
-    // hiccup, debrid CDN throttling). When that happens, samplesConsumed
-    // (the actual played-out sample count) stops advancing but the wall
-    // clock keeps ticking, so video drifts ahead of audio by however much
-    // time audio was starved. The drift is permanent and cumulative.
+    // Background: the mediabunny "EXPERIMENTAL: Custom Player Backend"
+    // toggle (Settings -> Player) routes ALL playback through a JS-side
+    // WebCodecs + AudioWorkletNode pipeline instead of the native HTML5
+    // <video> element. We added it as a workaround for EAC3/AC3 audio,
+    // which stock Electron's Chromium media stack doesn't support
+    // (proprietary_codecs=false at compile time excludes them from the
+    // HTML5 audio decoder allowlist).
     //
-    // The proper fix is a one-line change in upstream's getBackendPlaybackTime
-    // to use samplesConsumed/sampleRate instead of audioCtx.currentTime. We
-    // load the page from https://hayase.app/ (not our own bundle) so we can't
-    // edit the source directly. Instead, we monkey-patch from outside:
-    //   - Override AudioContext.prototype.currentTime to return synthetic
-    //     audio-progress-based time for any context that has the bunny
-    //     worklet attached (detected by name 'audio-stream-processor').
-    //   - Track samplesConsumed by listening to the worklet's progress
-    //     postMessages.
-    //   - Reset state when the page sends a flush (page sends flush when
-    //     the worklet's internal samplesConsumed is reset on pause/seek).
+    // v6.4.77 ships with the upstream-Hayase patched Electron via
+    // `pnpm electron:patch`, so AC3/EAC3/HEVC/DTS now play natively in
+    // <video>. The mediabunny pipeline is no longer needed for codec
+    // coverage.
     //
-    // The existing bunny formula then computes the correct synced time
-    // automatically because audioCtx.currentTime now reports audio-progress
-    // time. We don't touch baseLatency - the page's subtraction of it still
-    // accounts for the audio output device latency correctly.
-    const BUNNY_SYNC_INJECT = /* js */ `
+    // It's also been failing in our setup with two distinct errors:
+    //   - "AudioWorkletNode cannot be created: The node name 'audio-
+    //     stream-processor' is not defined in AudioWorkletGlobalScope."
+    //     (worklet module load + registerProcessor race when the
+    //     'audio-stream-processor' worklet hasn't fully registered)
+    //   - "Failed to construct 'AudioWorkletNode': parameter 1 is not
+    //     of type 'BaseAudioContext'." (subsequent attempts after the
+    //     first failure)
+    //
+    // The previous v6.4.76 BUNNY_SYNC_INJECT runtime patch attempted to
+    // override AudioContext.currentTime to use audio-sample progress
+    // instead of wall clock for sync. Wrapping window.AudioWorkletNode
+    // via a function constructor + Object.setPrototypeOf appears to
+    // break Chromium's WebIDL binding-layer type check on the first
+    // constructor argument — every AudioWorkletNode construction then
+    // fails with "parameter 1 not BaseAudioContext", which manifests as
+    // the toast spam. Removing the wrapper fixes the toasts; we don't
+    // need bunny anymore now that native codecs work.
+    //
+    // Users who previously toggled bunnyPlayer on (e.g. while testing
+    // EAC3 in v6.4.75/76) end up stuck with it enabled even after the
+    // toggle becomes unnecessary. Force it off in the preload — they
+    // can still re-enable manually if they want to test mediabunny.
+    const BUNNY_DISABLE_INJECT = /* js */ `
       (() => {
-        if (window.__hayaseBunnySyncPatch) return
-        window.__hayaseBunnySyncPatch = true
-
-        const OrigAudioWorkletNode = window.AudioWorkletNode
-        const baseProto = (window.BaseAudioContext || window.AudioContext)?.prototype
-        if (!OrigAudioWorkletNode || !baseProto) return
-
-        const origDesc = Object.getOwnPropertyDescriptor(baseProto, 'currentTime')
-        if (!origDesc || !origDesc.get) return
-        const origCurrentTimeGet = origDesc.get
-
-        const bunnyContexts = new WeakMap()
-
-        Object.defineProperty(baseProto, 'currentTime', {
-          get () {
-            const info = bunnyContexts.get(this)
-            if (info && info.sampleRate > 0) {
-              // Interpolate samplesConsumed forward based on real time elapsed
-              // since the last worklet report. Without interpolation video
-              // would stutter at the worklet's 100ms report cadence.
-              //
-              // Cap interpolation at samplesSent (tracked from page->worklet
-              // 'push' messages) so video can never advance past audio that's
-              // actually been queued. When audio is keeping up samplesSent
-              // grows ~2s ahead of samplesConsumed and interpolation runs
-              // smoothly. When audio decode/network can't keep up samplesSent
-              // stops growing - effective caps at samplesSent and video stalls
-              // exactly in lockstep with audio starvation, rather than running
-              // ahead and falling permanently out of sync.
-              const realNow = origCurrentTimeGet.call(this)
-              const elapsed = Math.max(0, realNow - info.lastReportRealTime)
-              const interpolated = info.samplesConsumed + (elapsed * info.sampleRate)
-              const effective = Math.min(interpolated, info.samplesSent)
-              return info.contextStartReal + (effective / info.sampleRate)
-            }
-            return origCurrentTimeGet.call(this)
-          },
-          configurable: true,
-          enumerable: origDesc.enumerable
-        })
-
-        function PatchedAudioWorkletNode (context, name, options) {
-          const node = new OrigAudioWorkletNode(context, name, options)
-          if (name === 'audio-stream-processor') {
-            const realNow = origCurrentTimeGet.call(context)
-            const info = {
-              samplesConsumed: 0,
-              samplesSent: 0,
-              sampleRate: context.sampleRate,
-              contextStartReal: realNow,
-              lastReportRealTime: realNow
-            }
-            bunnyContexts.set(context, info)
-
-            // Listen to worklet progress reports without touching the page's
-            // own port.onmessage handler. addEventListener piggybacks on the
-            // page's port.start() (which the page triggers via setting
-            // port.onmessage right after construction).
-            node.port.addEventListener('message', (e) => {
-              const data = e.data
-              if (data && data.type === 'progress' && typeof data.samplesConsumed === 'number') {
-                info.samplesConsumed = data.samplesConsumed
-                info.lastReportRealTime = origCurrentTimeGet.call(context)
-              }
-            })
-
-            // Intercept page->worklet messages to track:
-            //   - 'push' samples sent (used as the upper bound for interpolation
-            //     so video can't claim audio progress that wasn't queued)
-            //   - 'flush' resets (reset our local state in lockstep with the
-            //     worklet's internal samplesConsumed reset on pause/seek; without
-            //     this, post-resume our currentTime would report stale audio
-            //     progress and video would freeze until samples caught back up)
-            const origPost = node.port.postMessage.bind(node.port)
-            node.port.postMessage = function (msg, transferOrOptions) {
-              if (msg) {
-                if (msg.type === 'push' && msg.channelData && msg.channelData[0] && msg.channelData[0].length) {
-                  info.samplesSent += msg.channelData[0].length
-                } else if (msg.type === 'flush') {
-                  const now = origCurrentTimeGet.call(context)
-                  info.samplesConsumed = 0
-                  info.samplesSent = 0
-                  info.contextStartReal = now
-                  info.lastReportRealTime = now
-                }
-              }
-              return transferOrOptions !== undefined
-                ? origPost(msg, transferOrOptions)
-                : origPost(msg)
+        // One-shot reset: if the user previously enabled bunny (typically
+        // while testing EAC3 in v6.4.75/76), force it off ONCE. After this
+        // the marker is set in localStorage, so if the user deliberately
+        // re-enables bunny via Settings -> Player, we leave their choice
+        // alone forever.
+        if (window.__hayaseBunnyDisabled) return
+        window.__hayaseBunnyDisabled = true
+        try {
+          if (localStorage.getItem('__hayase_bunny_one_shot_reset')) return
+          const raw = localStorage.getItem('settings')
+          if (raw) {
+            const settings = JSON.parse(raw)
+            if (settings.bunnyPlayer === true) {
+              settings.bunnyPlayer = false
+              localStorage.setItem('settings', JSON.stringify(settings))
+              console.log('[hayase] One-shot reset: disabled mediabunny player toggle (no longer needed - native codecs work via patched Electron). Re-enable in Settings -> Player if you want to test it.')
             }
           }
-          return node
-        }
-        PatchedAudioWorkletNode.prototype = OrigAudioWorkletNode.prototype
-        Object.setPrototypeOf(PatchedAudioWorkletNode, OrigAudioWorkletNode)
-        window.AudioWorkletNode = PatchedAudioWorkletNode
-
-        console.log('[hayase] Bunny player A/V sync patch installed')
+          localStorage.setItem('__hayase_bunny_one_shot_reset', '1')
+        } catch {}
       })()
     `
     const inject = () => {
-      this.mainWindow.webContents.executeJavaScript(BUNNY_SYNC_INJECT).catch(() => undefined)
+      this.mainWindow.webContents.executeJavaScript(BUNNY_DISABLE_INJECT).catch(() => undefined)
       this.mainWindow.webContents.executeJavaScript(HAYASE_INJECT).catch(() => undefined)
     }
     this.mainWindow.webContents.on('did-finish-load', inject)
