@@ -147,4 +147,53 @@ export default async function afterPack (context) {
   } catch (err) {
     console.warn(`[after-pack] Could not strip backup files: ${err.message}`)
   }
+
+  // Drop Electron's default_app.asar. It's the placeholder UI Electron shows
+  // when no main module is provided ("Welcome to Electron" splash). We
+  // always have a main module via the electronFuses.onlyLoadAppFromAsar
+  // setting in electron-builder.yml, so the runtime never falls back to it.
+  // Tiny win (~108 KB) but free.
+  if (nodePlatform === 'win32' || nodePlatform === 'linux') {
+    const defaultApp = join(targetDir, 'resources', 'default_app.asar')
+    if (existsSync(defaultApp)) {
+      const sz = statSync(defaultApp).size
+      rmSync(defaultApp, { force: true })
+      console.log(`[after-pack] Removed default_app.asar (${(sz / 1024).toFixed(0)} KB)`)
+    }
+  }
+
+  // Drop SwiftShader (Chromium's software Vulkan/D3D11 fallback used when
+  // no usable GPU is present - VMs, RDP sessions, broken drivers) and the
+  // Vulkan loader DLL it depends on. Saves ~6 MB unpacked / ~1.5 MB
+  // installer. The only user-visible effect is that machines with no
+  // working GPU and no usable Vulkan driver will see a black canvas
+  // instead of WebGL UI effects (the underlying <video> hardware path
+  // and software ffmpeg decode still work, since those don't go through
+  // SwiftShader). For a torrent video player this is an acceptable
+  // trade-off - if you hit it, opt-out via HAYASE_KEEP_SWIFTSHADER=1.
+  if (nodePlatform === 'win32' && !env.HAYASE_KEEP_SWIFTSHADER) {
+    const swiftshaderTargets = ['vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll']
+    let removedBytes = 0
+    for (const f of swiftshaderTargets) {
+      const p = join(targetDir, f)
+      if (existsSync(p)) {
+        const sz = statSync(p).size
+        rmSync(p, { force: true })
+        removedBytes += sz
+      }
+    }
+    if (removedBytes > 0) {
+      console.log(`[after-pack] Removed SwiftShader + Vulkan loader (${(removedBytes / 1_000_000).toFixed(1)} MB - re-include via HAYASE_KEEP_SWIFTSHADER=1 if WebGL breaks on no-GPU machines)`)
+    }
+  }
+
+  // Tried gzip-compressing LICENSES.chromium.html here (15 MB plain text
+  // -> 1.9 MB gzipped). It saves disk space at install time but the
+  // installer actually got LARGER by ~1 MB because NSIS LZMA-solid compresses
+  // the raw HTML to ~3 MB on its own (and can't compress an already-gzipped
+  // payload further). Net trade-off was: -13 MB on user disk, +1 MB to
+  // download. For a torrent/streaming app where users care more about quick
+  // install + small download than the 13 MB on a multi-TB SSD, the trade
+  // isn't worth it. Leaving it uncompressed - NSIS handles the install-
+  // size compression for free.
 }

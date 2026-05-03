@@ -38,6 +38,16 @@ win:
     - "!eslint.config.mjs"
     - "!electron-dist/*"
     - "!resources/*"
+    # Aggressive node_modules trim. Most JS packages ship CHANGELOG, test
+    # fixtures, source maps, TypeScript sources, doc folders that are dead
+    # weight at runtime. Free 1-3 MB inside app.asar.
+    - "!**/node_modules/**/{test,tests,__tests__,example,examples,docs,doc,demo,coverage}/**"
+    - "!**/node_modules/**/*.{flow,markdown,yaml,yml,xml,html,coffee,svg,d.ts,d.cts,d.mts}"
+    - "!**/node_modules/**/{CHANGELOG,HISTORY,AUTHORS,CONTRIBUTORS,NOTICE,SECURITY,UPGRADE,UPGRADING,CODE_OF_CONDUCT,CONTRIBUTING,PATENTS,GOVERNANCE}*"
+    - "!**/node_modules/**/{Makefile,gulpfile.js,Gruntfile.js,bower.json,karma.conf.js,jest.config.js,rollup.config.js,vite.config.js,webpack.config.js}"
+    - "!**/node_modules/**/.{npmrc,nvmrc,nycrc,prettierrc,eslintrc,babelrc,editorconfig,gitignore,travis.yml,github}*"
+    - "!**/node_modules/**/{appveyor.yml,circle.yml,*.test.js,*.spec.js}"
+    - "!**/*.map"
   target:
     - target: nsis
       arch:
