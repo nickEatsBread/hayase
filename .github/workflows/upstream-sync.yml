@@ -1,0 +1,201 @@
+name: Sync upstream Hayase repos
+
+# Each subdirectory in this monorepo (electron/, interface/, torrent-client/,
+# native/, capacitor/, free-torrents/, wiki/) mirrors a separate hayase-app
+# repo. This workflow pulls upstream changes per-package via git's subtree
+# merge strategy and opens a PR for each one with changes.
+#
+# Each package gets its own PR so they can be reviewed and merged
+# independently. Conflicts with our fork's local additions (debrid module,
+# Discord RPC toggle, settings injection in HAYASE_INJECT, patched-Electron
+# install scripts, etc) won't block other packages from syncing.
+#
+# Trigger options:
+#   - Schedule:           Mondays 08:00 UTC (weekly)
+#   - workflow_dispatch:  manual trigger from the Actions tab, optionally
+#                         with a single package selector
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to sync (or "all")'
+        type: choice
+        options:
+          - all
+          - electron
+          - interface
+          - torrent-client
+          - native
+          - capacitor
+          - free-torrents
+          - wiki
+        default: all
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync ${{ matrix.package.name }}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.package == 'all' || github.event.inputs.package == matrix.package.name
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - { name: electron,        repo: hayase-app/electron        }
+          - { name: interface,       repo: hayase-app/interface       }
+          - { name: torrent-client,  repo: hayase-app/torrent-client  }
+          - { name: native,          repo: hayase-app/native          }
+          - { name: capacitor,       repo: hayase-app/capacitor       }
+          - { name: free-torrents,   repo: hayase-app/free-torrents   }
+          - { name: wiki,            repo: hayase-app/wiki            }
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Need a fresh token here so the resulting branch push fires
+          # the standard PR opening workflow rather than being blocked
+          # by the default GITHUB_TOKEN's restrictions on triggering
+          # other workflows.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "nickEatsBread-bot"
+          git config user.email "281274910+nickEatsBread@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        id: fetch
+        run: |
+          set -euo pipefail
+          REMOTE="upstream-${{ matrix.package.name }}"
+          URL="https://github.com/${{ matrix.package.repo }}.git"
+
+          if git remote get-url "$REMOTE" >/dev/null 2>&1; then
+            git remote set-url "$REMOTE" "$URL"
+          else
+            git remote add "$REMOTE" "$URL"
+          fi
+
+          # Try main first, fall back to master for older repos.
+          if git fetch "$REMOTE" main 2>/dev/null; then
+            echo "branch=main" >> "$GITHUB_OUTPUT"
+          elif git fetch "$REMOTE" master 2>/dev/null; then
+            echo "branch=master" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not fetch main or master from $URL"
+            exit 1
+          fi
+
+          UPSTREAM_SHA=$(git rev-parse "$REMOTE/$(cat "$GITHUB_OUTPUT" | grep ^branch= | cut -d= -f2)")
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream_short_sha=${UPSTREAM_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Try subtree merge
+        id: sync
+        run: |
+          set +e
+          REMOTE="upstream-${{ matrix.package.name }}"
+          BRANCH="${{ steps.fetch.outputs.branch }}"
+          PKG="${{ matrix.package.name }}"
+
+          # First sync of a never-before-merged upstream needs unrelated
+          # histories permission - subsequent syncs reuse the merge base.
+          EXTRA_FLAGS=""
+          if ! git merge-base HEAD "$REMOTE/$BRANCH" >/dev/null 2>&1; then
+            EXTRA_FLAGS="--allow-unrelated-histories"
+          fi
+
+          # --squash applies upstream changes as a single staged delta -
+          # no merge commit, no upstream history pollution. -X subtree=PKG
+          # remaps the upstream root onto our PKG/ subdirectory.
+          git merge --squash -X "subtree=$PKG" $EXTRA_FLAGS "$REMOTE/$BRANCH"
+          MERGE_STATUS=$?
+
+          if [ $MERGE_STATUS -eq 0 ]; then
+            if git diff --cached --quiet; then
+              echo "result=no-changes" >> "$GITHUB_OUTPUT"
+              echo "::notice::$PKG already up to date with $REMOTE/$BRANCH (no diff)."
+            else
+              echo "result=changes" >> "$GITHUB_OUTPUT"
+              # Commit the staged changes so peter-evans can push as a
+              # single fast-forward branch with a clean message.
+              git commit -m "sync ${PKG} from upstream
+
+          Pulled from ${REMOTE}/${BRANCH} at ${{ steps.fetch.outputs.upstream_short_sha }}.
+
+          Auto-generated by .github/workflows/upstream-sync.yml."
+            fi
+          else
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            # Capture conflicted files for the error message and abort the
+            # merge so the working tree is clean for the next matrix entry.
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            echo "conflicts=$CONFLICTS" >> "$GITHUB_OUTPUT"
+            git merge --abort 2>/dev/null || git reset --hard HEAD
+          fi
+
+      - name: Open PR for clean sync
+        if: steps.sync.outputs.result == 'changes'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: upstream-sync/${{ matrix.package.name }}
+          delete-branch: true
+          base: main
+          title: 'sync ${{ matrix.package.name }} from upstream (${{ steps.fetch.outputs.upstream_short_sha }})'
+          body: |
+            Automated sync from `${{ matrix.package.repo }}@${{ steps.fetch.outputs.branch }}` (`${{ steps.fetch.outputs.upstream_short_sha }}`).
+
+            Generated by `.github/workflows/upstream-sync.yml` on ${{ github.event_name == 'schedule' && 'schedule' || 'manual dispatch' }}.
+
+            **Review carefully before merging.** Upstream changes may conflict semantically (not just textually) with this fork's local additions:
+
+            - debrid module in `torrent-client/` (Real-Debrid / AllDebrid / Premiumize / TorBox + localhost HTTP proxy)
+            - Discord RPC master toggle in `electron/src/main/discord.ts`
+            - Settings injection in `electron/src/main/app.ts` (`HAYASE_INJECT` block, `injectDebrid` / `injectRpcMaster` / `injectCheckUpdate`)
+            - Patched-Electron install scripts in `scripts/install-patched-electron.mjs`
+            - `electronDist` config in `electron/electron-builder.yml`
+            - after-pack hooks for ffmpeg + bundle-trim cleanup in `electron/scripts/after-pack.mjs`
+
+            If upstream renamed/moved any of the files our hooks target (e.g. settings page paths, MutationObserver anchors, settings store keys), the runtime injection might silently break — test before merging.
+
+      - name: Report conflict
+        if: steps.sync.outputs.result == 'conflict'
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## :warning: Sync conflict in \`${{ matrix.package.name }}\`
+
+          The subtree merge from \`${{ matrix.package.repo }}@${{ steps.fetch.outputs.upstream_short_sha }}\` produced conflicts that need manual resolution.
+
+          **Conflicting files:**
+          \`\`\`
+          ${{ steps.sync.outputs.conflicts }}
+          \`\`\`
+
+          **To resolve locally:**
+          \`\`\`bash
+          git checkout main
+          git pull
+          pnpm sync:upstream ${{ matrix.package.name }}
+          # ...resolve conflicts in your editor...
+          git add <resolved files>
+          git commit -m "sync ${{ matrix.package.name }} from upstream"
+          git push
+          \`\`\`
+          EOF
+
+          echo "::warning::Conflict syncing ${{ matrix.package.name }}: ${{ steps.sync.outputs.conflicts }}"
+          # Don't fail the job - we still want other packages in the matrix
+          # to attempt their syncs. The summary + warning surface this for
+          # the user to act on.
+
+      - name: Note no-op
+        if: steps.sync.outputs.result == 'no-changes'
+        run: echo "::notice::${{ matrix.package.name }} is already current with upstream."

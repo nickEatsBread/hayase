@@ -234,8 +234,17 @@ export default class IPC {
 
   async updateReady () {
     const update = await autoUpdater.checkForUpdates()
-    if (!update) throw new Error('No update available')
-    await update.downloadPromise
+    // electron-updater returns a non-null UpdateCheckResult even when we're
+    // already on the latest version - the truthy check on `update` only
+    // catches network errors / rate limits. The actual "is there an update"
+    // signal is `isUpdateAvailable`. Without this branch the renderer's
+    // Check For Update button hits `await undefined` (downloadPromise is
+    // null when no update), the promise resolves immediately, and the
+    // button incorrectly transitions to "Restart to Install" even though
+    // there's nothing to install - clicking restart then either no-ops or
+    // relaunches without updating, both of which are confusing.
+    if (!update?.isUpdateAvailable) throw new Error('No update available')
+    if (update.downloadPromise) await update.downloadPromise
   }
 
   async spawnPlayer (url: string) {
