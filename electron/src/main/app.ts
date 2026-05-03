@@ -242,21 +242,26 @@ export default class App {
       this.destroy()
     })
 
-    // Inject our debrid + RPC settings into hayase.app's existing settings
-    // pages so they appear inline alongside the upstream settings instead of
-    // hiding in a separate window. Watches the SPA URL via MutationObserver
-    // (hayase.app uses History API navigation - no full page loads).
+    // Inject the fork's debrid + RPC settings into hayase.app's existing
+    // settings pages so they look like part of the upstream UI:
+    //   - "Debrid" section appended at the end of /app/settings/client
+    //   - "Enable Discord Rich Presence" toggle prepended inside the
+    //     existing "Rich Presence Settings" group on /app/settings/interface
     //
-    // Card markup mirrors interface/src/lib/components/SettingCard.svelte
-    // (flex layout + bg-neutral-950) so it visually blends in.
-    const HAYASE_PLUS_INJECT = /* js */ `
+    // Hayase.app uses SvelteKit SPA routing (no full page loads) so we
+    // re-check on every DOM mutation, but bail fast unless the URL is one
+    // of the two settings pages. Section markers prevent duplicates.
+    //
+    // All cards mirror interface/src/lib/components/SettingCard.svelte's
+    // markup (flex + bg-neutral-950) so they're visually identical to
+    // upstream cards.
+    const HAYASE_INJECT = /* js */ `
       (() => {
-        if (window.__hayasePlusInjector) return
-        window.__hayasePlusInjector = true
-        const NS = 'hayase-plus'
+        if (window.__hayaseInjector) return
+        window.__hayaseInjector = true
         const get = () => window.native?.getExtras?.() ?? Promise.resolve(null)
         const set = (e) => window.native?.setExtras?.(e) ?? Promise.resolve()
-        const test = (p, k) => window.native?.testDebridKey?.(p, k) ?? Promise.reject(new Error('testDebridKey unavailable'))
+        const test = (p, k) => window.native?.testDebridKey?.(p, k) ?? Promise.reject(new Error('unavailable'))
 
         const PROVIDERS = {
           none: 'Disabled (use BitTorrent)',
@@ -266,18 +271,18 @@ export default class App {
           torbox: 'TorBox'
         }
 
-        function header (text) {
+        function header (text, marker) {
           const h = document.createElement('div')
           h.className = 'font-weight-bold text-xl font-bold'
-          h.dataset.hayasePlus = '1'
+          h.dataset.injected = marker
           h.textContent = text
           return h
         }
 
-        function card (title, description, control) {
+        function card (title, description, control, marker) {
           const wrap = document.createElement('div')
           wrap.className = 'flex flex-col md:flex-row md:items-center justify-between bg-neutral-950 rounded-md px-6 py-4 gap-3'
-          wrap.dataset.hayasePlus = '1'
+          wrap.dataset.injected = marker
           const label = document.createElement('label')
           label.className = 'space-1 block leading-[unset] grow'
           const titleEl = document.createElement('div')
@@ -296,7 +301,6 @@ export default class App {
           btn.type = 'button'
           btn.setAttribute('role', 'switch')
           btn.setAttribute('aria-checked', String(!!checked))
-          btn.dataset.state = checked ? 'checked' : 'unchecked'
           btn.style.cssText = 'position:relative;width:32px;height:16px;border-radius:9999px;border:2px solid transparent;cursor:pointer;flex-shrink:0;transition:background 120ms;background:' + (checked ? '#fff' : '#3f3f46')
           const thumb = document.createElement('span')
           thumb.style.cssText = 'display:block;width:12px;height:12px;border-radius:50%;background:' + (checked ? '#000' : '#a1a1aa') + ';transform:translateX(' + (checked ? '16px' : '0') + ');transition:transform 120ms,background 120ms'
@@ -304,7 +308,6 @@ export default class App {
           btn.addEventListener('click', () => {
             const next = btn.getAttribute('aria-checked') !== 'true'
             btn.setAttribute('aria-checked', String(next))
-            btn.dataset.state = next ? 'checked' : 'unchecked'
             btn.style.background = next ? '#fff' : '#3f3f46'
             thumb.style.background = next ? '#000' : '#a1a1aa'
             thumb.style.transform = next ? 'translateX(16px)' : 'translateX(0)'
@@ -313,11 +316,24 @@ export default class App {
           return btn
         }
 
-        async function buildClientSection () {
+        // Find the container that holds upstream's settings cards on the
+        // current page. We use the last existing section header's parent -
+        // that's the same container the rest of the page's cards live in.
+        function findSettingsContainer () {
+          const headers = document.querySelectorAll("div.font-weight-bold.text-xl.font-bold:not([data-injected])")
+          for (let i = headers.length - 1; i >= 0; i--) {
+            const p = headers[i].parentElement
+            if (p && p.querySelector('div.bg-neutral-950.rounded-md')) return p
+          }
+          return null
+        }
+
+        async function injectDebrid () {
+          if (document.querySelector('[data-injected="debrid"]')) return
+          const container = findSettingsContainer()
+          if (!container) return
           const extras = await get()
-          if (!extras) return null
-          const frag = document.createDocumentFragment()
-          frag.appendChild(header('Hayase+ Debrid Streaming'))
+          if (!extras) return
 
           const select = document.createElement('select')
           select.className = 'w-64 shrink-0 bg-background border border-input rounded-md px-3 py-2 text-sm'
@@ -328,110 +344,121 @@ export default class App {
             if (v === extras.debridProvider) opt.selected = true
             select.appendChild(opt)
           }
+
+          const keyInput = document.createElement('input')
+          keyInput.type = 'password'
+          keyInput.autocomplete = 'off'
+          keyInput.placeholder = 'paste your API key'
+          keyInput.value = extras.debridApiKey
+          keyInput.className = 'bg-background rounded-md border border-input px-3 py-2 text-sm w-64'
+
+          const testBtn = document.createElement('button')
+          testBtn.type = 'button'
+          testBtn.textContent = 'Test'
+          testBtn.style.cssText = 'background:#27272a;color:#fff;cursor:pointer;border:1px solid #3f3f46;border-radius:6px;padding:8px 14px;font:inherit'
+
+          const statusEl = document.createElement('div')
+          statusEl.style.cssText = 'font-size:12px;min-height:16px;color:#a1a1aa'
+
+          const keyRow = document.createElement('div')
+          keyRow.style.cssText = 'display:flex;gap:8px;align-items:center'
+          keyRow.append(keyInput, testBtn)
+          const keyCol = document.createElement('div')
+          keyCol.style.cssText = 'display:flex;flex-direction:column;gap:6px;flex-shrink:0'
+          keyCol.append(keyRow, statusEl)
+
+          const debridHeader = header('Debrid', 'debrid')
+          const providerCard = card('Debrid Provider', 'Stream torrents through a debrid service instead of peer-to-peer. Once a provider and key are configured, every torrent resolves via the debrid CDN — no local torrenting. Requires a paid account.', select, 'debrid')
+          const keyCard = card('API Key', "Your debrid token. Stored locally in Hayase's settings.json. Hit Test to verify.", keyCol, 'debrid')
+          keyCard.style.display = extras.debridProvider === 'none' ? 'none' : ''
+
           select.addEventListener('change', async () => {
             extras.debridProvider = select.value
             await set(extras)
             keyCard.style.display = extras.debridProvider === 'none' ? 'none' : ''
+            statusEl.textContent = ''
           })
-          frag.appendChild(card('Debrid Provider', 'Stream torrents through a debrid service instead of P2P. Once configured, every torrent uses the debrid CDN - no torrenting at all. Requires a paid account with the chosen provider.', select))
-
-          const keyWrap = document.createElement('div')
-          keyWrap.style.cssText = 'display:flex;gap:8px;align-items:stretch'
-          const keyInput = document.createElement('input')
-          keyInput.type = 'password'
-          keyInput.autocomplete = 'off'
-          keyInput.placeholder = 'paste your API key here'
-          keyInput.value = extras.debridApiKey
-          keyInput.className = 'sm:w-80 bg-background rounded-md border border-input px-3 py-2 text-sm'
           keyInput.addEventListener('input', async () => {
             extras.debridApiKey = keyInput.value
             await set(extras)
             statusEl.textContent = ''
           })
-          const testBtn = document.createElement('button')
-          testBtn.type = 'button'
-          testBtn.textContent = 'Test'
-          testBtn.className = 'font-bold px-4 py-2 rounded-md bg-secondary text-secondary-foreground border border-input'
-          testBtn.style.cssText += 'background:#27272a;color:#fff;cursor:pointer'
           let testing = false
           testBtn.addEventListener('click', async () => {
             if (testing) return
             testing = true
             testBtn.disabled = true
-            const oldText = testBtn.textContent
-            testBtn.textContent = 'Testing...'
+            const t = testBtn.textContent
+            testBtn.textContent = 'Testing…'
+            statusEl.style.color = '#a1a1aa'
             statusEl.textContent = ''
             try {
               const status = await test(extras.debridProvider, extras.debridApiKey)
               statusEl.style.color = '#5dd896'
-              statusEl.textContent = 'Authenticated as ' + status.user + (status.premium ? ' (premium)' : ' (free - limited)')
+              statusEl.textContent = 'Authenticated as ' + status.user + (status.premium ? ' (premium)' : ' (free)')
             } catch (e) {
               statusEl.style.color = '#ff7373'
               statusEl.textContent = (e && e.message) || String(e)
             } finally {
               testing = false
               testBtn.disabled = false
-              testBtn.textContent = oldText
+              testBtn.textContent = t
             }
           })
-          keyWrap.append(keyInput, testBtn)
-          const keyCol = document.createElement('div')
-          keyCol.style.cssText = 'display:flex;flex-direction:column;gap:6px;flex-shrink:0'
-          const statusEl = document.createElement('div')
-          statusEl.style.cssText = 'font-size:12px;min-height:16px'
-          keyCol.append(keyWrap, statusEl)
-          const keyCard = card('Debrid API Key', "Your API token. Stored locally in Hayase's settings.json - never sent anywhere except the debrid provider.", keyCol)
-          keyCard.style.display = extras.debridProvider === 'none' ? 'none' : ''
-          frag.appendChild(keyCard)
 
-          return frag
+          container.append(debridHeader, providerCard, keyCard)
         }
 
-        async function buildInterfaceSection () {
+        async function injectRpcMaster () {
+          if (document.querySelector('[data-injected="rpc"]')) return
+          // Find the existing "Show Details in Discord Rich Presence" card
+          // and prepend the master toggle just before it (so both live in
+          // the existing "Rich Presence Settings" group).
+          const labels = document.querySelectorAll('div.font-bold')
+          let detailsCard = null
+          for (const l of labels) {
+            if (l.textContent && l.textContent.includes('Show Details in Discord Rich Presence')) {
+              detailsCard = l.closest('div.bg-neutral-950')
+              break
+            }
+          }
+          if (!detailsCard) return
           const extras = await get()
-          if (!extras) return null
-          const frag = document.createDocumentFragment()
-          frag.appendChild(header('Hayase+ Discord Rich Presence'))
-          frag.appendChild(card(
+          if (!extras) return
+
+          const sw = makeSwitch(extras.enableRPC, async (v) => {
+            extras.enableRPC = v
+            await set(extras)
+            // Reflect the disabled state of the upstream "Show Details"
+            // switch when the master is off (matches upstream's intended
+            // behaviour from when this toggle was in the source).
+            const detailsSwitch = detailsCard.querySelector('button[role="switch"]')
+            if (detailsSwitch) detailsSwitch.style.opacity = v ? '' : '0.4'
+          })
+          const masterCard = card(
             'Enable Discord Rich Presence',
-            'Master toggle for Discord RPC. Turn off to disconnect from Discord entirely - nothing is sent. Restores the upstream-removed feature.',
-            makeSwitch(extras.enableRPC, async (v) => { extras.enableRPC = v; await set(extras) })
-          ))
-          return frag
+            'Shows your Hayase activity in your Discord profile. Turn this off to disconnect from Discord entirely — nothing will be sent.',
+            sw,
+            'rpc'
+          )
+          detailsCard.parentElement && detailsCard.parentElement.insertBefore(masterCard, detailsCard)
+
+          // Sync upstream details switch opacity with master state.
+          const detailsSwitch = detailsCard.querySelector('button[role="switch"]')
+          if (detailsSwitch) detailsSwitch.style.opacity = extras.enableRPC ? '' : '0.4'
         }
 
-        function findSettingsRoot () {
-          // Hayase.app's settings pages render section headers as
-          // "<div class='font-weight-bold text-xl font-bold'>...</div>" so
-          // we grab the first one and use its parent as the container.
-          const headers = document.querySelectorAll("div.font-weight-bold.text-xl.font-bold:not([data-hayase-plus])")
-          if (!headers.length) return null
-          return headers[0].parentElement
-        }
-
-        async function ensureInjected () {
+        function tick () {
           const path = location.pathname.replace(/\\/+$/, '')
-          const isClient = path.endsWith('/app/settings/client')
-          const isInterface = path.endsWith('/app/settings/interface')
-          if (!isClient && !isInterface) return
-          if (document.querySelector('[data-hayase-plus-section="' + (isClient ? 'client' : 'interface') + '"]')) return
-          const root = findSettingsRoot()
-          if (!root) return
-          const frag = isClient ? await buildClientSection() : await buildInterfaceSection()
-          if (!frag) return
-          const marker = document.createElement('div')
-          marker.dataset.hayasePlusSection = isClient ? 'client' : 'interface'
-          marker.style.display = 'contents'
-          marker.appendChild(frag)
-          root.appendChild(marker)
+          if (path.endsWith('/app/settings/client')) injectDebrid().catch(() => undefined)
+          else if (path.endsWith('/app/settings/interface')) injectRpcMaster().catch(() => undefined)
         }
 
-        const tick = () => { ensureInjected().catch(() => undefined) }
         new MutationObserver(tick).observe(document.documentElement, { childList: true, subtree: true })
         tick()
       })()
     `
-    const inject = () => this.mainWindow.webContents.executeJavaScript(HAYASE_PLUS_INJECT).catch(() => undefined)
+    const inject = () => this.mainWindow.webContents.executeJavaScript(HAYASE_INJECT).catch(() => undefined)
     this.mainWindow.webContents.on('did-finish-load', inject)
     this.mainWindow.webContents.on('did-frame-finish-load', (_e, isMainFrame) => { if (isMainFrame) inject() })
 
