@@ -505,16 +505,27 @@ export default class TorrentClient {
 
     const proxyPort = this._ensureDebridProxy()
 
-    return files.map((file, id) => ({
-      hash: fakeHash,
-      name: file.name,
-      type: this._guessMime(file.name),
-      size: file.size,
-      path: file.path,
-      id,
-      url: this._buildDebridProxyUrl('localhost', proxyPort, file.url, file.name),
-      lan: this._buildDebridProxyUrl(networkAddress(), proxyPort, file.url, file.name)
-    }))
+    // Reset per-play attachment state so the previous torrent's metadata
+    // doesn't bleed into this one.
+    this.attachments.filemap.clear()
+    this.attachments.debridUrlToKey.clear()
+
+    return files.map((file, id) => {
+      // Register MKV/WebM files for matroska-metadata parsing so the player
+      // gets audio tracks, subtitle tracks, attachments (fonts) and
+      // chapters - same as it would when playing via WebTorrent.
+      this.attachments.registerDebrid(file.url, fakeHash, id, file.name)
+      return {
+        hash: fakeHash,
+        name: file.name,
+        type: this._guessMime(file.name),
+        size: file.size,
+        path: file.path,
+        id,
+        url: this._buildDebridProxyUrl('localhost', proxyPort, file.url, file.name),
+        lan: this._buildDebridProxyUrl(networkAddress(), proxyPort, file.url, file.name)
+      }
+    })
   }
 
   // Spin up a tiny localhost HTTP server that forwards range requests to the
@@ -613,7 +624,30 @@ export default class TorrentClient {
         }
       })
 
-      upstreamRes.pipe(res)
+      // Feed bytes through matroska-metadata so audio/subtitle tracks,
+      // attachments (fonts), chapters and live subtitle events all work for
+      // debrid-streamed MKVs - just like WebTorrent playback. We only do
+      // this when the player is reading from byte 0 (the initial sequential
+      // playback request); seeks and parallel range fetches would feed the
+      // parser arbitrary mid-file bytes and confuse it.
+      const reqRange = String(req.headers.range ?? '')
+      const isInitialFullStream = !reqRange || reqRange === 'bytes=0-' || reqRange.startsWith('bytes=0-,') || /^bytes=0-\d/.test(reqRange)
+      if (isInitialFullStream) {
+        const wrapped = this.attachments.feedDebrid(upstream, this._streamToAsyncIterable(upstreamRes))
+        ;(async () => {
+          try {
+            for await (const chunk of wrapped) {
+              if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
+            }
+          } catch (e) {
+            console.error('[debrid-proxy] stream error', e)
+          } finally {
+            res.end()
+          }
+        })()
+      } else {
+        upstreamRes.pipe(res)
+      }
     })
 
     upstreamReq.on('error', err => {
@@ -622,6 +656,14 @@ export default class TorrentClient {
     })
     req.on('close', () => upstreamReq.destroy())
     upstreamReq.end()
+  }
+
+  // Convert a Node IncomingMessage to an AsyncIterable<Uint8Array> for
+  // matroska-metadata's parseStream.
+  async * _streamToAsyncIterable (stream: IncomingMessage): AsyncIterable<Uint8Array> {
+    for await (const chunk of stream) {
+      yield chunk as Uint8Array
+    }
   }
 
   async _toDebridSource (id: string | ArrayBufferView): Promise<{ source: { kind: 'magnet', value: string } | { kind: 'torrent', value: Uint8Array }, hash: string }> {

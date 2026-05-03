@@ -454,8 +454,21 @@ export default class App {
           if (detailsSwitch) detailsSwitch.style.opacity = extras.enableRPC ? '' : '0.4'
         }
 
+        // Hayase's settings layout (interface/src/routes/app/settings/+layout.svelte)
+        // renders each category's +page.svelte content directly inside a
+        // <div class='space-y-3 w-full pb-10 lg:max-w-6xl'> via <slot/>.
+        // That div belongs to the LAYOUT, so when the SPA navigates between
+        // categories Svelte only removes its tracked slot children - our
+        // injected nodes (which Svelte never knew about) survive and end up
+        // showing on every category. Track the path and explicitly remove
+        // any [data-injected] elements when it changes.
+        let lastPath = ''
         function tick () {
           const path = location.pathname.replace(/\\/+$/, '')
+          if (path !== lastPath) {
+            lastPath = path
+            for (const el of document.querySelectorAll('[data-injected]')) el.remove()
+          }
           if (path.endsWith('/app/settings/client')) injectDebrid().catch(() => undefined)
           else if (path.endsWith('/app/settings/interface')) injectRpcMaster().catch(() => undefined)
         }

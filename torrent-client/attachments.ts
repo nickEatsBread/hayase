@@ -52,6 +52,7 @@ export default new class Attachments {
 
   register (files: Array<File & EventEmitter>, hash: string) {
     this.filemap.clear()
+    this.debridUrlToKey.clear()
     files.forEach((file, id) => {
       if (file.name.endsWith('.mkv') || file.name.endsWith('.webm')) {
         this.filemap.set(hash + id, file)
@@ -61,6 +62,39 @@ export default new class Attachments {
         })
       }
     })
+  }
+
+  // Map of upstream debrid URL -> "hash + id" key into filemap. Used by the
+  // debrid HTTP proxy to feed the bytes it streams from the CDN through
+  // matroska-metadata for the registered file.
+  debridUrlToKey = new Map<string, string>()
+
+  // Called by torrent-client when starting a debrid playback. We register a
+  // fake File-like so the existing _metadata / attachments / tracks /
+  // subtitle / chapters methods all work the same way they do for torrents.
+  registerDebrid (debridUrl: string, hash: string, id: number, name: string) {
+    if (!name.endsWith('.mkv') && !name.endsWith('.webm')) return
+    const key = hash + id
+    const fake = Object.assign(Object.create(null) as Record<string, unknown>, { name }) as unknown as File & EventEmitter
+    this.filemap.set(key, fake)
+    this.debridUrlToKey.set(debridUrl, key)
+  }
+
+  // Called by the proxy as bytes flow from the debrid CDN. Returns a wrapped
+  // async iterable that the proxy should pipe to the client; matroska-metadata
+  // parses these bytes inline so getTracks / getAttachments / getChapters
+  // resolve and 'subtitle' events fire as the player streams.
+  feedDebrid (debridUrl: string, iterator: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array> {
+    const key = this.debridUrlToKey.get(debridUrl)
+    if (!key) return iterator
+    const file = this.filemap.get(key)
+    if (!file) return iterator
+    let metadata = this.metadatamap.get(file)
+    if (!metadata) {
+      metadata = new Metadata(file) as Metadata & EventEmitter
+      this.metadatamap.set(file, metadata)
+    }
+    try { return (metadata.parseStream(iterator) ?? iterator) as AsyncIterable<Uint8Array> } catch { return iterator }
   }
 
   async attachments (hash: string, id: number) {
