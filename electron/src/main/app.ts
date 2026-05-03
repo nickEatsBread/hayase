@@ -83,14 +83,23 @@ export default class App {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: true,
-      // AudioVideoTracks exposes HTMLMediaElement.audioTracks / videoTracks
-      // (off by default in Chromium since 2018) so multi-track MKVs from
-      // hayase.app's player show their audio tracks in the picker. Note that
-      // even with the API exposed, the Chromium HTML5 video pipeline does
-      // not actually re-decode when track.enabled flips - real audio track
-      // switching requires the experimental mediabunny backend (Settings →
-      // Player → "EXPERIMENTAL: Custom Player Backend", visible only in dev).
-      enableBlinkFeatures: 'FluentOverlayScrollbars,FluentOverlayScrollbar,AudioVideoTracks',
+      // Note: tried enabling 'AudioVideoTracks' in v6.4.69 to expose
+      // HTMLMediaElement.audioTracks. It backfired - hayase's
+      // checkAudio() (player.svelte) does:
+      //   if (video.audioTracks) {
+      //     if (!video.audioTracks.length) toast('Audio Codec Unsupported')
+      //   } else { /* fallback - only errors if no audio decoded */ }
+      // Chromium populates audioTracks as an EMPTY list for some MKV
+      // variants (notably EAC3) even when the audio decodes fine, so the
+      // flag turned a working file into a false-positive toast and broke
+      // default-track playback because there were "no tracks to pick from".
+      // Without the flag, audioTracks is undefined and the fallback path
+      // only errors when audio actually fails to decode - matches upstream
+      // Hayase's behaviour. Audio track switching is unavailable but that
+      // never worked in our build anyway (Chromium HTML5 video pipeline
+      // doesn't re-decode on track.enabled flip - it'd require the
+      // experimental mediabunny backend).
+      enableBlinkFeatures: 'FluentOverlayScrollbars,FluentOverlayScrollbar',
       backgroundThrottling: true
     }
   })
