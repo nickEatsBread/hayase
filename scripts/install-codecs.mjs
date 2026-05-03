@@ -14,7 +14,7 @@
 // Docs: https://www.electronjs.org/docs/latest/tutorial/proprietary-codecs
 
 import { spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { argv, exit, platform, arch, env } from 'node:process'
@@ -78,28 +78,35 @@ function unzip (zipPath, destDir) {
   }
 }
 
-// Reusable: download and install the proprietary ffmpeg into a specific
-// Electron distribution directory (e.g. dist/win-unpacked or
-// node_modules/electron/dist). Called from electron-builder's afterPack hook
-// to patch packaged builds.
-export async function installCodecsInto ({ targetDir, version, platformName, archName, force = false } = {}) {
-  if (!targetDir || !existsSync(targetDir)) throw new Error(`targetDir does not exist: ${targetDir}`)
-  if (!version) throw new Error('version is required')
-  const platformKey = PLATFORM_MAP[platformName ?? platform]
-  const archKey = ARCH_MAP[archName ?? arch]
-  if (!platformKey || !archKey) throw new Error(`Unsupported platform: ${platformName ?? platform}-${archName ?? arch}`)
+// Resolve the source ffmpeg binary into a local file. Supports:
+//   - undefined    download the official Electron proprietary build (no DTS)
+//   - file path    use that file as-is (e.g. C:/Program Files/Hayase/ffmpeg.dll)
+//   - http(s):// URL pointing at a raw ffmpeg.dll/.so/.dylib
+//   - http(s):// URL pointing at a .zip containing one
+async function resolveSource ({ source, version, platformKey, archKey, fileName }) {
+  if (source && !/^https?:\/\//i.test(source)) {
+    if (!existsSync(source)) throw new Error(`--source path does not exist: ${source}`)
+    return { kind: 'file', path: source }
+  }
 
-  const target = join(targetDir, FFMPEG_FILENAME[platformName ?? platform])
-  const backup = target + '.original'
-  if (!existsSync(target)) throw new Error(`Stock ffmpeg not found at ${target}`)
-
-  if (existsSync(backup) && !force) return { skipped: true, target }
-
-  const url = `https://github.com/electron/electron/releases/download/v${version}/ffmpeg-v${version}-${platformKey}-${archKey}.zip`
-  const tmp = join(tmpdir(), `hayase-ffmpeg-${version}-${platformKey}-${archKey}-${Date.now()}`)
+  const tmp = join(tmpdir(), `hayase-ffmpeg-${Date.now()}`)
   mkdirSync(tmp, { recursive: true })
-  const zipPath = join(tmp, 'ffmpeg.zip')
 
+  if (source) {
+    const dest = join(tmp, source.toLowerCase().endsWith('.zip') ? 'ffmpeg.zip' : fileName)
+    await download(source, dest)
+    if (dest.endsWith('.zip')) {
+      unzip(dest, tmp)
+      const extracted = join(tmp, fileName)
+      if (!existsSync(extracted)) throw new Error(`Source zip did not contain ${fileName}`)
+      return { kind: 'file', path: extracted, cleanup: tmp }
+    }
+    return { kind: 'file', path: dest, cleanup: tmp }
+  }
+
+  // Default: download official Electron proprietary build
+  const url = `https://github.com/electron/electron/releases/download/v${version}/ffmpeg-v${version}-${platformKey}-${archKey}.zip`
+  const zipPath = join(tmp, 'ffmpeg.zip')
   try {
     await download(url, zipPath)
   } catch (err) {
@@ -107,23 +114,86 @@ export async function installCodecsInto ({ targetDir, version, platformName, arc
     console.log(`  Primary download failed (${err.message}); trying mirror...`)
     await download(mirror, zipPath)
   }
-
   unzip(zipPath, tmp)
-  const replacement = join(tmp, FFMPEG_FILENAME[platformName ?? platform])
-  if (!existsSync(replacement)) throw new Error(`Extracted zip did not contain ${FFMPEG_FILENAME[platformName ?? platform]}`)
+  const extracted = join(tmp, fileName)
+  if (!existsSync(extracted)) throw new Error(`Extracted zip did not contain ${fileName}`)
+  return { kind: 'file', path: extracted, cleanup: tmp }
+}
+
+// Reusable: install a proprietary ffmpeg into a specific Electron
+// distribution directory (e.g. dist/win-unpacked or node_modules/electron/dist).
+// Called from electron-builder's afterPack hook to patch packaged builds.
+//
+// Pass `source` (file path or URL) to use a richer ffmpeg than the official
+// Electron release. Useful for sourcing DTS-enabled builds.
+export async function installCodecsInto ({ targetDir, version, platformName, archName, force = false, source } = {}) {
+  if (!targetDir || !existsSync(targetDir)) throw new Error(`targetDir does not exist: ${targetDir}`)
+  if (!version) throw new Error('version is required')
+  const platformKey = PLATFORM_MAP[platformName ?? platform]
+  const archKey = ARCH_MAP[archName ?? arch]
+  if (!platformKey || !archKey) throw new Error(`Unsupported platform: ${platformName ?? platform}-${archName ?? arch}`)
+  const fileName = FFMPEG_FILENAME[platformName ?? platform]
+
+  const target = join(targetDir, fileName)
+  const backup = target + '.original'
+  if (!existsSync(target)) throw new Error(`Stock ffmpeg not found at ${target}`)
+
+  if (existsSync(backup) && !force) return { skipped: true, target }
+
+  const resolved = await resolveSource({ source, version, platformKey, archKey, fileName })
 
   if (!existsSync(backup)) renameSync(target, backup)
   else rmSync(target, { force: true })
-  renameSync(replacement, target)
-  rmSync(tmp, { recursive: true, force: true })
+
+  // Use copy (not rename) so the source file isn't moved out from under the
+  // user when they pointed at a permanent location like Program Files.
+  copyFileSync(resolved.path, target)
+
+  if (resolved.cleanup) rmSync(resolved.cleanup, { recursive: true, force: true })
 
   const newSize = statSync(target).size
-  return { skipped: false, target, newSize }
+  return { skipped: false, target, newSize, source: resolved.path }
+}
+
+function arg (name) {
+  const i = argv.indexOf(name)
+  if (i < 0) return undefined
+  return argv[i + 1]
+}
+
+// Look in well-known Hayase install locations for an ffmpeg.dll/.so/.dylib
+// that already includes DTS and other extras the official Electron build
+// omits. Returns null if nothing usable is found.
+function findRichLocalFfmpeg () {
+  const fileName = FFMPEG_FILENAME[platform]
+  const candidates = []
+  if (platform === 'win32') {
+    candidates.push(`C:/Program Files/Hayase/${fileName}`, `C:/Program Files (x86)/Hayase/${fileName}`)
+    if (env.LOCALAPPDATA) candidates.push(join(env.LOCALAPPDATA, 'Programs', 'Hayase', fileName))
+  } else if (platform === 'darwin') {
+    candidates.push(`/Applications/Hayase.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/${fileName}`)
+  } else {
+    candidates.push(`/opt/Hayase/${fileName}`, `/usr/lib/hayase/${fileName}`)
+  }
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) {
+        const size = statSync(c).size
+        // The DTS-enabled build is ~4.5 MB; the standard proprietary build is
+        // ~1.6 MB. Anything notably larger than the standard build implies
+        // extra codecs.
+        if (size > 3_000_000) return { path: c, size }
+      }
+    } catch {}
+  }
+  return null
 }
 
 async function main () {
   const force = argv.includes('--force') || argv.includes('-f')
   const restoreOriginal = argv.includes('--restore')
+  const noAutoDetect = argv.includes('--no-auto-detect')
+  let source = arg('--source') ?? env.HAYASE_FFMPEG_SOURCE
 
   const electronDir = findElectronDir()
   const version = readElectronVersion(electronDir)
@@ -149,60 +219,52 @@ async function main () {
   }
 
   const stockSize = statSync(target).size
+
   // Idempotency: presence of the .original backup means we already swapped in
   // the proprietary build at some point. Skip unless --force.
   if (existsSync(backup) && !force) {
     console.log(`\nProprietary codecs already installed (backup exists at ${backup}).`)
-    console.log(`Pass --force to redownload, or --restore to revert to the stock ffmpeg.`)
+    console.log(`Pass --force to redownload, --restore to revert to the stock ffmpeg,`)
+    console.log(`or --source <path|url> to install a different ffmpeg build.`)
     return
   }
 
-  const platformKey = PLATFORM_MAP[platform]
-  const archKey = ARCH_MAP[arch]
-  if (!platformKey || !archKey) throw new Error(`Unsupported platform: ${platform}-${arch}`)
-
-  const url = `https://github.com/electron/electron/releases/download/v${version}/ffmpeg-v${version}-${platformKey}-${archKey}.zip`
-  const tmp = join(tmpdir(), `hayase-ffmpeg-${version}-${platformKey}-${archKey}`)
-  if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
-  mkdirSync(tmp, { recursive: true })
-  const zipPath = join(tmp, 'ffmpeg.zip')
-
-  console.log('\nDownloading proprietary ffmpeg from electron/electron releases...')
-  try {
-    await download(url, zipPath)
-  } catch (err) {
-    // Fall back to the npmmirror mirror used elsewhere in this project.
-    const mirror = `https://npmmirror.com/mirrors/electron/v${version}/ffmpeg-v${version}-${platformKey}-${archKey}.zip`
-    console.log(`Primary download failed (${err.message}); trying mirror...`)
-    await download(mirror, zipPath)
+  // If no explicit source given, look for a richer ffmpeg from a local Hayase
+  // install. Mention what we picked so it's not invisible behaviour.
+  if (!source && !noAutoDetect) {
+    const local = findRichLocalFfmpeg()
+    if (local) {
+      console.log(`\nAuto-detected richer ffmpeg from local Hayase install:`)
+      console.log(`  ${local.path} (${local.size.toLocaleString()} bytes - includes DTS)`)
+      console.log(`  Pass --no-auto-detect to skip this and download the official Electron build instead.`)
+      source = local.path
+    }
   }
 
-  console.log('Extracting...')
-  unzip(zipPath, tmp)
-
-  const replacement = join(tmp, FFMPEG_FILENAME[platform])
-  if (!existsSync(replacement)) throw new Error(`Extracted zip did not contain ${FFMPEG_FILENAME[platform]}`)
-
-  if (!existsSync(backup)) {
-    console.log(`Backing up stock ffmpeg → ${backup}`)
-    renameSync(target, backup)
+  if (source) {
+    console.log(`\nInstalling ffmpeg from custom source: ${source}`)
   } else {
-    rmSync(target, { force: true })
+    console.log(`\nDownloading official Electron proprietary ffmpeg (no DTS support)...`)
   }
 
-  renameSync(replacement, target)
+  const result = await installCodecsInto({
+    targetDir: distDir(electronDir),
+    version,
+    force,
+    source
+  })
 
-  const newSize = statSync(target).size
-  console.log(`\nProprietary ffmpeg installed: ${newSize.toLocaleString()} bytes (was ${stockSize.toLocaleString()}).`)
-  console.log(`Now decoding: H.264, H.265/HEVC, AAC, AC-3, E-AC-3, MP3, Opus, FLAC, Vorbis, TrueHD.`)
-  console.log(`\nNot included (rare in anime, common on Blu-ray rips):`)
-  console.log(`  - DTS / DTS-HD: Requires a custom ffmpeg with --enable-decoder=dca compiled in.`)
-  console.log(`    Hayase's official builds ship a hand-rolled ffmpeg.dll with DTS enabled.`)
-  console.log(`    For DTS support, drop a custom-built ffmpeg.${platform === 'win32' ? 'dll' : platform === 'darwin' ? 'dylib' : 'so'} into ${distDir(electronDir)}/`)
-  console.log(`    or use Castlabs Electron (npm i electron@npm:@castlabs/electron-releases).`)
+  console.log(`\nffmpeg installed: ${result.newSize.toLocaleString()} bytes (was ${stockSize.toLocaleString()}).`)
+  if (result.newSize > 3_000_000) {
+    console.log(`Now decoding: H.264, H.265/HEVC, AAC, AC-3, E-AC-3, MP3, Opus, FLAC, Vorbis, TrueHD, DTS/DTS-HD.`)
+  } else {
+    console.log(`Now decoding: H.264, H.265/HEVC, AAC, AC-3, E-AC-3, MP3, Opus, FLAC, Vorbis, TrueHD.`)
+    console.log(`\nNot included (DTS/DTS-HD): pass --source <path-or-url-to-ffmpeg.dll>`)
+    console.log(`pointing at a build with --enable-decoder=dca compiled in.`)
+    console.log(`The simplest source is the production Hayase install's ffmpeg.dll, e.g.:`)
+    console.log(`  pnpm codecs:install --source "C:/Program Files/Hayase/ffmpeg.dll" --force`)
+  }
   console.log(`\nRestore the stock ffmpeg with: pnpm codecs:restore`)
-
-  rmSync(tmp, { recursive: true, force: true })
 }
 
 // Only run the CLI when invoked directly. When imported as a module (e.g. by

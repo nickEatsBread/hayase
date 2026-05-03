@@ -158,10 +158,6 @@ publish:
 # from node_modules, so leave this commented out and rely on `pnpm
 # codecs:install` to swap ffmpeg.dll into node_modules/electron/dist/.
 # electronDist: electron-dist
-extraResources:
-  - from: ../interface/build
-    to: ui
-    filter: ['**/*']
 protocols:
   - name: hayase
     schemes:

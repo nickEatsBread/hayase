@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+# Mark prebuilt binaries as binary so git doesn't attempt textual diffs.
+electron/resources/proprietary-ffmpeg-*.dll binary
+electron/resources/proprietary-ffmpeg-*.so binary
+electron/resources/proprietary-ffmpeg-*.dylib binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary

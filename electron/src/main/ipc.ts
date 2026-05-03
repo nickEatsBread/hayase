@@ -99,7 +99,9 @@ export default class IPC {
   updateSettings (settings: TorrentSettings = store.data.torrentSettings) {
     store.set('torrentSettings', settings)
 
-    this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath } })
+    // Always merge in current extras (debrid) so settings updates from
+    // hayase.app's UI don't accidentally clear our debrid configuration.
+    this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath, debridProvider: store.data.extras.debridProvider, debridApiKey: store.data.extras.debridApiKey } })
   }
 
   async selectDownload () {
@@ -154,6 +156,30 @@ export default class IPC {
 
   toggleDiscordRPC (enabled: boolean) {
     this.discord.setEnabled(enabled)
+  }
+
+  // Read the persisted Hayase+ extras settings (debrid + RPC toggles).
+  getExtras () {
+    return store.get('extras')
+  }
+
+  // Persist + apply extras settings live. Called by the extras window when the
+  // user changes a value, and at startup to apply the saved state.
+  applyExtras (extras: typeof store.data.extras) {
+    store.set('extras', extras)
+    this.discord.setEnabled(extras.enableRPC)
+    this.discord.allowDiscordDetails = extras.showDetailsInRPC
+    this.discord.debouncedDiscordRPC()
+    this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath, debridProvider: extras.debridProvider, debridApiKey: extras.debridApiKey } })
+  }
+
+  // Verify a debrid API key. We import checkAuth from torrent-client so the
+  // logic stays in one place; the test runs in the main process so the
+  // extras window doesn't have to deal with CORS for the various provider APIs.
+  async checkDebridKey (provider: typeof store.data.extras.debridProvider, apiKey: string) {
+    if (provider === 'none') throw new Error('No debrid provider selected')
+    const { checkAuth } = await import('torrent-client/debrid/index.ts')
+    return await checkAuth(provider, apiKey)
   }
 
   setMediaSession (metadata: SessionMetadata, id: number) {

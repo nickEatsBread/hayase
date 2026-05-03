@@ -20,8 +20,19 @@ const DEFAULTS = {
     torrentPort: 0,
     dhtPort: 0,
     torrentPeX: false
+  },
+  // Extra fork-only settings (Hayase+ Extras window). Live here separately
+  // from torrentSettings so they survive even when hayase.app's UI rewrites
+  // the rest of the settings blob via updateSettings.
+  extras: {
+    enableRPC: true,
+    showDetailsInRPC: true,
+    debridProvider: 'none' as 'none' | 'realdebrid' | 'alldebrid' | 'premiumize' | 'torbox',
+    debridApiKey: ''
   }
 }
+
+export type ExtrasSettings = typeof DEFAULTS.extras
 
 class Store {
   path: string

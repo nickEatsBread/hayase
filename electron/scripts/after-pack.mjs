@@ -6,18 +6,43 @@
 // H.264, H.265, AAC, or AC-3 - which covers approximately none of the torrents
 // users actually want to play.
 
-import { resolve } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { env, platform as procPlatform } from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { installCodecsInto } from '../../scripts/install-codecs.mjs'
 
+const HOOK_DIR = dirname(fileURLToPath(import.meta.url))
+const ELECTRON_RESOURCES = resolve(HOOK_DIR, '..', 'resources')
+
 const PLATFORM_ARCH = {
-  win32: { platformName: 'win32' },
-  linux: { platformName: 'linux' },
-  darwin: { platformName: 'darwin' }
+  win32: { platformName: 'win32', fileName: 'ffmpeg.dll' },
+  linux: { platformName: 'linux', fileName: 'libffmpeg.so' },
+  darwin: { platformName: 'darwin', fileName: 'libffmpeg.dylib' }
 }
 
-const SCRIPT_DIR = fileURLToPath(new URL('.', import.meta.url))
+// Look in well-known Hayase install locations for an ffmpeg.dll/.so/.dylib
+// that already includes DTS and other codecs not in the official Electron
+// proprietary build. Used as the default source for packaged builds when
+// HAYASE_FFMPEG_SOURCE isn't explicitly set.
+function findRichLocalFfmpeg (nodePlatform, fileName) {
+  const candidates = []
+  if (nodePlatform === 'win32') {
+    candidates.push(`C:/Program Files/Hayase/${fileName}`, `C:/Program Files (x86)/Hayase/${fileName}`)
+    if (env.LOCALAPPDATA) candidates.push(`${env.LOCALAPPDATA}/Programs/Hayase/${fileName}`)
+  } else if (nodePlatform === 'darwin') {
+    candidates.push(`/Applications/Hayase.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/${fileName}`)
+  } else {
+    candidates.push(`/opt/Hayase/${fileName}`, `/usr/lib/hayase/${fileName}`)
+  }
+  for (const c of candidates) {
+    try {
+      if (existsSync(c) && statSync(c).size > 3_000_000) return c
+    } catch {}
+  }
+  return null
+}
 
 export default async function afterPack (context) {
   const { appOutDir, packager, electronPlatformName, arch } = context
@@ -40,19 +65,47 @@ export default async function afterPack (context) {
   }
 
   const version = packager.config.electronVersion ?? packager.info.framework.version
+
+  // Source precedence:
+  //   1. HAYASE_FFMPEG_SOURCE env var (explicit, file path or URL)
+  //   2. A workspace-checked-in DTS-enabled ffmpeg at electron/resources/
+  //      proprietary-ffmpeg-<platform>-<arch>.<ext>. This is the canonical
+  //      source - we ship this in git so the build is reproducible.
+  //   3. A richer ffmpeg from a local Hayase install on the build machine
+  //   4. Official Electron proprietary build (no DTS)
+  let source = env.HAYASE_FFMPEG_SOURCE
+  if (!source) {
+    const ext = nodePlatform === 'win32' ? 'dll' : nodePlatform === 'darwin' ? 'dylib' : 'so'
+    const checkedIn = resolve(ELECTRON_RESOURCES, `proprietary-ffmpeg-${nodePlatform}-${archName}.${ext}`)
+    if (existsSync(checkedIn)) {
+      console.log(`[after-pack] Using checked-in ffmpeg from workspace: ${checkedIn}`)
+      source = checkedIn
+    }
+  }
+  if (!source && nodePlatform === procPlatform) {
+    const local = findRichLocalFfmpeg(nodePlatform, platformInfo.fileName)
+    if (local) {
+      console.log(`[after-pack] Auto-detected richer ffmpeg from local Hayase install: ${local}`)
+      source = local
+    }
+  }
+
   console.log(`[after-pack] Installing proprietary codecs for ${nodePlatform}-${archName} (electron v${version}) into ${targetDir}`)
+  if (source) console.log(`[after-pack] Using ffmpeg source: ${source}`)
+  else console.log(`[after-pack] Using official Electron proprietary build (no DTS support)`)
 
   try {
     const result = await installCodecsInto({
       targetDir,
       version,
       platformName: nodePlatform,
-      archName
+      archName,
+      source
     })
     if (result.skipped) {
       console.log(`[after-pack] Codecs already installed at ${result.target}`)
     } else {
-      console.log(`[after-pack] Installed proprietary ffmpeg (${result.newSize.toLocaleString()} bytes) at ${result.target}`)
+      console.log(`[after-pack] Installed ffmpeg (${result.newSize.toLocaleString()} bytes) at ${result.target}`)
     }
   } catch (err) {
     console.error(`[after-pack] Failed to install proprietary codecs: ${err.message}`)

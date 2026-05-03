@@ -1,12 +1,10 @@
-import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
-import { pathToFileURL } from 'node:url'
 
 import { electronApp, is } from '@electron-toolkit/utils'
 import electronShutdownHandler from '@paymoapp/electron-shutdown-handler'
 import { expose } from 'abslink/electron'
-import { BrowserWindow, MessageChannelMain, app, dialog, ipcMain, net, powerMonitor, shell, utilityProcess, Tray, Menu, protocol, nativeImage, session, nativeTheme, webFrame } from 'electron' // type NativeImage, Notification, nativeImage,
+import { BrowserWindow, MessageChannelMain, app, dialog, ipcMain, powerMonitor, shell, utilityProcess, Tray, Menu, protocol, nativeImage, session, nativeTheme, webFrame } from 'electron' // type NativeImage, Notification, nativeImage,
 import log from 'electron-log/main'
 import { autoUpdater } from 'electron-updater'
 
@@ -17,6 +15,7 @@ import './util.ts'
 import { rewriteInternalRequest } from './al.ts'
 import forkPath from './background/background.ts?modulePath'
 import Discord from './discord.ts'
+import { applyStoredExtrasOnStartup, openExtrasWindow } from './extras-window.ts'
 // import Protocol from './protocol.ts'
 import IPC from './ipc.ts'
 import Protocol from './protocol.ts'
@@ -39,40 +38,14 @@ autoUpdater.logger = log
 
 // const TRANSPARENCY = store.get('transparency')
 
-// Resolve the bundled UI directory.
-// - When packaged by electron-builder, electron-builder.yml's extraResources
-//   copies interface/build/ to <resources>/ui/ (process.resourcesPath/ui).
-// - When running unpackaged from source, it lives at <repo>/interface/build/.
-function findBundledUI (): string | null {
-  const candidates = [
-    join(process.resourcesPath, 'ui'),
-    join(__dirname, '../../../interface/build'),
-    join(__dirname, '../../interface/build')
-  ]
-  for (const c of candidates) {
-    if (existsSync(join(c, 'index.html'))) return c
-  }
-  return null
-}
-
-const BUNDLED_UI = findBundledUI()
-
-// BASE_URL precedence:
-//   1. HAYASE_BASE_URL env var (manual override, e.g. "https://hayase.app/")
-//   2. Dev mode -> local interface dev server on :7344
-//   3. Bundled UI present -> custom app:// scheme, served from disk
-//   4. Fallback -> hayase.app (preserves original behaviour if bundling skipped)
-const BASE_URL = process.env.HAYASE_BASE_URL ?? (
-  is.dev
-    ? 'http://localhost:7344/'
-    : BUNDLED_UI
-      ? 'app://hayase.local/'
-      : 'https://hayase.app/'
-)
+// Match upstream: production builds load the UI directly from
+// https://hayase.app/. Dev mode optionally points at a local interface
+// dev server on :7344 (run via `pnpm dev:interface`). Override via
+// HAYASE_BASE_URL if you ever need to point this elsewhere.
+const BASE_URL = process.env.HAYASE_BASE_URL ?? (is.dev ? 'http://localhost:7344/' : 'https://hayase.app/')
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'https', privileges: { standard: true, bypassCSP: true, allowServiceWorkers: true, supportFetchAPI: true, corsEnabled: false, stream: true, codeCache: true, secure: true } },
-  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, allowServiceWorkers: true, stream: true, codeCache: true, corsEnabled: true } }
+  { scheme: 'https', privileges: { standard: true, bypassCSP: true, allowServiceWorkers: true, supportFetchAPI: true, corsEnabled: false, stream: true, codeCache: true, secure: true } }
 ])
 
 function setCors (record?: Record<string, string[]>, credentails = false) {
@@ -126,27 +99,6 @@ export default class App {
   constructor () {
     if (store.data.doh) this.setDOH(store.data.doh)
     nativeTheme.themeSource = 'dark'
-
-    // Serve the bundled SvelteKit UI via app:// when present. SvelteKit's
-    // adapter-static fallback means unknown paths must fall through to
-    // index.html so the SPA router can handle them client-side.
-    if (BUNDLED_UI) {
-      const uiDir = BUNDLED_UI
-      protocol.handle('app', async (request) => {
-        const url = new URL(request.url)
-        const decoded = decodeURIComponent(url.pathname).replace(/^\/+/, '')
-        let filePath = join(uiDir, decoded || 'index.html')
-        try {
-          if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
-            filePath = join(uiDir, 'index.html')
-          }
-        } catch {
-          filePath = join(uiDir, 'index.html')
-        }
-        return await net.fetch(pathToFileURL(filePath).toString())
-      })
-      log.info(`Serving bundled UI from ${uiDir}`)
-    }
 
     expose(this.ipc, ipcMain, this.mainWindow.webContents)
     this.mainWindow.setMenuBarVisibility(false)
@@ -265,6 +217,10 @@ export default class App {
           this.mainWindow.focus()
         }
       },
+      {
+        label: 'Hayase+ Extras (debrid / RPC)',
+        click: () => openExtrasWindow(this.ipc)
+      },
       { type: 'separator' },
       { label: 'Exit Hayase', click: () => this.destroy() }
     ]))
@@ -369,13 +325,18 @@ export default class App {
     const reloadPorts = () => {
       if (this.destroyed) return
       const { port1, port2 } = new MessageChannelMain()
-      this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath } }, [port1])
+      this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath, debridProvider: store.data.extras.debridProvider, debridApiKey: store.data.extras.debridApiKey } }, [port1])
 
       this.mainWindow.webContents.postMessage('port', null, [port2])
     }
 
     const { port1, port2 } = new MessageChannelMain()
-    this.torrentProcess.once('spawn', () => this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath, doh: this.hasDOH && store.data.doh } }, [port1]))
+    this.torrentProcess.once('spawn', () => {
+      this.torrentProcess.postMessage({ id: 'settings', data: { ...store.data.torrentSettings, path: store.data.torrentPath, doh: this.hasDOH && store.data.doh, debridProvider: store.data.extras.debridProvider, debridApiKey: store.data.extras.debridApiKey } }, [port1])
+      // Apply Hayase+ extras (debrid + RPC) once the torrent process is up,
+      // so a configured RPC toggle / debrid provider is live from launch.
+      applyStoredExtrasOnStartup(this.ipc)
+    })
     ipcMain.once('preload-done', () => {
       this.mainWindow.webContents.postMessage('port', null, [port2])
       ipcMain.on('preload-done', () => reloadPorts())

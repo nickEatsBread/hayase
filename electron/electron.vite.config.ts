@@ -136,6 +136,14 @@ export default defineConfig({
   },
   preload: {
     // preload is too small for bytecodePlugin to be effective
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          extras: resolve(__dirname, 'src/preload/extras.ts')
+        }
+      }
+    },
     plugins: [
       license({
         thirdParty: {
