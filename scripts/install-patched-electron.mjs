@@ -262,6 +262,18 @@ async function main () {
   console.log(`  Electron dist:    ${distDir}`)
   console.log(`  Electron version: v${ourVersion}`)
 
+  // Sanity: dist/ has to exist with the actual stock binaries before we can
+  // swap. pnpm-workspace.yaml has electron in ignoredBuiltDependencies so a
+  // fresh `pnpm install` doesn't trigger Electron's install.js. CI flows
+  // need to run `cd node_modules/electron && node install.js` first - on
+  // dev machines this happens once after the very first install and stays
+  // populated. Detect + error out clearly if dist/ is missing.
+  if (!existsSync(distDir) || !existsSync(join(distDir, config.binaryToName))) {
+    throw new Error(`node_modules/electron/dist/ doesn't have ${config.binaryToName} - Electron's postinstall hasn't run.\n` +
+      `Run: cd ${electronDir} && node install.js\n` +
+      `(pnpm skips this because electron is in pnpm-workspace.yaml ignoredBuiltDependencies.)`)
+  }
+
   // The full file list including the renamed binary.
   const allPatchedFiles = [config.binaryToName, ...config.patchedFiles]
 

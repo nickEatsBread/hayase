@@ -85,6 +85,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run Electron's postinstall to populate node_modules/electron/dist
+        # pnpm-workspace.yaml has `electron` in ignoredBuiltDependencies so
+        # the standard postinstall (which downloads + extracts the platform
+        # zip) is skipped during pnpm install. Explicitly run install.js to
+        # populate node_modules/electron/dist so the next step can swap the
+        # patched binaries in.
+        shell: bash
+        run: |
+          cd node_modules/electron
+          node install.js
+          ls -la dist/ | head -20
+
       - name: Install patched Electron
         # Downloads upstream Hayase NSIS installer + extracts the patched
         # Electron with proprietary_codecs=true Chromium media stack into
@@ -135,6 +147,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run Electron's postinstall to populate node_modules/electron/dist
+        # pnpm-workspace.yaml has `electron` in ignoredBuiltDependencies so
+        # the standard postinstall (which downloads + extracts the platform
+        # zip) is skipped during pnpm install. Explicitly run install.js to
+        # populate node_modules/electron/dist so the next step can swap the
+        # patched binaries in.
+        run: |
+          cd node_modules/electron
+          node install.js
+          ls -la dist/ | head -20
 
       - name: Install patched Electron
         # Downloads upstream Hayase .deb + extracts via dpkg-deb -x.
