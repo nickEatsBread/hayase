@@ -227,7 +227,22 @@ Optional repo variables:
 
 Without any of these configured, the workflow falls back to the manual review path — logs which files would conflict and points you at `pnpm sync:upstream <pkg>` for local resolution.
 
-AI-resolved syncs land as PRs titled `[AI] sync PKG from upstream (SHA)` for human review before merging — never merged automatically.
+### Auto-merging sync PRs
+
+Both clean and AI-resolved sync PRs can auto-merge when ready. Default behaviour:
+
+| PR type | Default | Override |
+|---|---|---|
+| **Clean syncs** (`sync PKG from upstream (SHA)`) — upstream changed files we don't touch | **Auto-merge ON** | Set repo variable `AUTO_MERGE_CLEAN_SYNCS=false` to disable |
+| **AI-resolved syncs** (`[AI] sync PKG from upstream (SHA)`) — model resolved conflicts | **Auto-merge OFF** | Set repo variable `AUTO_MERGE_AI_PRS=true` to opt in |
+
+The split is risk-based: clean syncs by definition only touch upstream-only files, so the diff carries minimal risk. AI-resolved syncs touch files we have local additions in, and an open-weight model occasionally drops or mangles them silently.
+
+**One-time repo settings to enable auto-merge:**
+1. **Settings → General → Pull Requests → Allow auto-merge** (checkbox)
+2. (already set up) Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"
+
+If auto-merge can't fire (e.g. branch protection requires reviewers), the PR stays open for manual handling — the workflow won't fail.
 
 ## License
 
