@@ -42,7 +42,6 @@ jobs:
   sync:
     name: Sync ${{ matrix.package.name }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.inputs.package == 'all' || github.event.inputs.package == matrix.package.name
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +55,25 @@ jobs:
           - { name: wiki,            repo: hayase-app/wiki            }
 
     steps:
+      # Per-package filter at step level. GitHub Actions doesn't expose the
+      # matrix context inside job-level `if:` so we can't filter at the
+      # job header - we'd hit "Unrecognized named-value: matrix" at workflow
+      # parse time. Instead each step checks this output.
+      - name: Determine if this matrix entry should run
+        id: selected
+        run: |
+          INPUT="${{ github.event.inputs.package }}"
+          if [[ "${{ github.event_name }}" == "schedule" ]] \
+             || [[ "$INPUT" == "all" ]] \
+             || [[ "$INPUT" == "${{ matrix.package.name }}" ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping ${{ matrix.package.name }} (manual dispatch selected '$INPUT' instead)."
+          fi
+
       - name: Checkout fork
+        if: steps.selected.outputs.go == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -67,11 +84,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity
+        if: steps.selected.outputs.go == 'true'
         run: |
           git config user.name "nickEatsBread-bot"
           git config user.email "281274910+nickEatsBread@users.noreply.github.com"
 
       - name: Add upstream remote and fetch
+        if: steps.selected.outputs.go == 'true'
         id: fetch
         run: |
           set -euo pipefail
@@ -99,6 +118,7 @@ jobs:
           echo "upstream_short_sha=${UPSTREAM_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Try subtree merge
+        if: steps.selected.outputs.go == 'true'
         id: sync
         run: |
           set +e
@@ -143,7 +163,7 @@ jobs:
           fi
 
       - name: Open PR for clean sync
-        if: steps.sync.outputs.result == 'changes'
+        if: steps.selected.outputs.go == 'true' && steps.sync.outputs.result == 'changes'
         uses: peter-evans/create-pull-request@v6
         with:
           branch: upstream-sync/${{ matrix.package.name }}
@@ -167,7 +187,7 @@ jobs:
             If upstream renamed/moved any of the files our hooks target (e.g. settings page paths, MutationObserver anchors, settings store keys), the runtime injection might silently break — test before merging.
 
       - name: Report conflict
-        if: steps.sync.outputs.result == 'conflict'
+        if: steps.selected.outputs.go == 'true' && steps.sync.outputs.result == 'conflict'
         run: |
           cat <<EOF >> "$GITHUB_STEP_SUMMARY"
           ## :warning: Sync conflict in \`${{ matrix.package.name }}\`
@@ -197,5 +217,5 @@ jobs:
           # the user to act on.
 
       - name: Note no-op
-        if: steps.sync.outputs.result == 'no-changes'
+        if: steps.selected.outputs.go == 'true' && steps.sync.outputs.result == 'no-changes'
         run: echo "::notice::${{ matrix.package.name }} is already current with upstream."
