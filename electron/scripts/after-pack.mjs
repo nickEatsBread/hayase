@@ -6,8 +6,8 @@
 // H.264, H.265, AAC, or AC-3 - which covers approximately none of the torrents
 // users actually want to play.
 
-import { existsSync, statSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { env, platform as procPlatform } from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -111,5 +111,40 @@ export default async function afterPack (context) {
     console.error(`[after-pack] Failed to install proprietary codecs: ${err.message}`)
     console.error(`[after-pack] The packaged app will fall back to stock ffmpeg without H.264/H.265/AAC/AC-3 support.`)
     // Don't fail the build - the app will still run, just without proprietary codecs.
+  }
+
+  // Strip backup files left behind by scripts/install-patched-electron.mjs
+  // and scripts/install-codecs.mjs. Without this, the installer balloons by
+  // ~230 MB because the patched-Electron extraction backs up the entire
+  // stock dist (electron.exe, ffmpeg.dll, snapshot_blob.bin, v8_context_
+  // snapshot.bin, resources.pak, icudtl.dat) under .electron-original
+  // sidecars in node_modules/electron/dist - and electron-builder's
+  // electronDist mode copies the entire source dir verbatim, backups and
+  // all. The 'files' glob filter only applies to project files (the asar
+  // bundle), not to the unpacked Electron contents. So we delete the
+  // sidecars from the staged appOutDir before NSIS packs it.
+  //
+  // Backups stay intact in node_modules/electron/dist itself - they're
+  // only stripped from the packaged build, so `pnpm electron:restore`
+  // still works for local dev.
+  let stripped = 0
+  let strippedBytes = 0
+  try {
+    for (const entry of readdirSync(targetDir)) {
+      if (entry.endsWith('.electron-original') || entry.endsWith('.original') || entry === '.patched-electron-version') {
+        const full = join(targetDir, entry)
+        try {
+          const size = statSync(full).size
+          rmSync(full, { force: true })
+          stripped++
+          strippedBytes += size
+        } catch {}
+      }
+    }
+    if (stripped > 0) {
+      console.log(`[after-pack] Stripped ${stripped} backup/sentinel file(s) from packaged build (${(strippedBytes / 1_000_000).toFixed(1)} MB freed)`)
+    }
+  } catch (err) {
+    console.warn(`[after-pack] Could not strip backup files: ${err.message}`)
   }
 }

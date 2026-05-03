@@ -470,6 +470,79 @@ export default class App {
           if (detailsSwitch) detailsSwitch.style.opacity = extras.enableRPC ? '' : '0.4'
         }
 
+        async function injectCheckUpdate () {
+          if (document.querySelector('[data-injected="checkupdate"]')) return
+          // Anchor: the Import / Export / Reset button row that's hardcoded
+          // at the top of /app/settings/app (interface/src/routes/app/
+          // settings/app/+page.svelte ~line 113). It's a div.grid.grid-cols-1
+          // .md\\:grid-cols-3 - we walk the document looking for the one
+          // that contains the import button.
+          let anchor = null
+          for (const g of document.querySelectorAll('div.grid')) {
+            if (g.textContent && g.textContent.includes('Import Settings From File')) { anchor = g; break }
+          }
+          if (!anchor) return
+
+          let version = ''
+          try { version = await window.native?.version?.() ?? '' } catch {}
+
+          const btn = document.createElement('button')
+          btn.type = 'button'
+          btn.textContent = 'Check Now'
+          btn.style.cssText = 'background:#27272a;color:#fff;cursor:pointer;border:1px solid #3f3f46;border-radius:6px;padding:8px 14px;font:inherit;flex-shrink:0'
+
+          const wrap = card(
+            'Check for Update',
+            'Looks for newer releases of this fork (nickEatsBread/hayase). The autoupdater also polls every 30 minutes in the background — this button is for impatient checks. Current version: v' + (version || '?'),
+            btn,
+            'checkupdate'
+          )
+          // Insert ABOVE the import/export grid so app-management actions
+          // visually flow: Check for Update -> Import/Export -> Reset.
+          anchor.parentElement && anchor.parentElement.insertBefore(wrap, anchor)
+
+          let busy = false
+          btn.addEventListener('click', async () => {
+            if (busy) return
+            busy = true
+            btn.disabled = true
+            const orig = btn.textContent
+            btn.textContent = 'Checking…'
+            try {
+              // updateReady() does a check + downloads if newer; throws
+              // 'No update available' if we're current. checkUpdate() just
+              // returns void with no result indication.
+              await window.native.updateReady()
+              btn.textContent = 'Restart to Install'
+              btn.style.background = '#5dd896'
+              btn.style.color = '#000'
+              btn.style.borderColor = '#5dd896'
+              btn.disabled = false
+              btn.onclick = () => window.native.updateAndRestart()
+            } catch (e) {
+              const msg = (e && e.message) || String(e)
+              if (/no update/i.test(msg)) {
+                btn.textContent = 'Up to date'
+                btn.style.background = '#27272a'
+              } else {
+                btn.textContent = 'Check failed'
+                btn.style.background = '#ff7373'
+                btn.style.color = '#000'
+                btn.style.borderColor = '#ff7373'
+                console.error('[hayase] update check failed:', e)
+              }
+              setTimeout(() => {
+                btn.textContent = orig
+                btn.style.background = '#27272a'
+                btn.style.color = '#fff'
+                btn.style.borderColor = '#3f3f46'
+                btn.disabled = false
+                busy = false
+              }, 4000)
+            }
+          })
+        }
+
         // Hayase's settings layout (interface/src/routes/app/settings/+layout.svelte)
         // renders each category's +page.svelte content directly inside a
         // <div class='space-y-3 w-full pb-10 lg:max-w-6xl'> via <slot/>.
@@ -487,6 +560,7 @@ export default class App {
           }
           if (path.endsWith('/app/settings/client')) injectDebrid().catch(() => undefined)
           else if (path.endsWith('/app/settings/interface')) injectRpcMaster().catch(() => undefined)
+          else if (path.endsWith('/app/settings/app')) injectCheckUpdate().catch(() => undefined)
         }
 
         // Inject a <style> rule that hides the peer count + upload speed
