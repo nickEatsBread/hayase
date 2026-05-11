@@ -108,6 +108,11 @@ export interface TorrentSettings extends DebridSettings {
   torrentPort: number
   dhtPort: number
   torrentPeX: boolean
+  nzbDomain: string
+  nzbLogin: string
+  nzbPassword: string
+  nzbPort: number
+  nzbPoolSize: number
 }
 
 export interface LibraryEntry {
@@ -170,6 +175,7 @@ export interface Native {
   torrentInfo: (hash: string) => Promise<TorrentInfo>
   peerInfo: (hash: string) => Promise<PeerInfo[]>
   fileInfo: (hash: string) => Promise<FileInfo[]>
+  trackers: (hash: string) => Promise<Record<string, { complete: number, downloaded: number, incomplete: number, failed: boolean }>>
   protocolStatus: (hash: string) => Promise<{
     dht: boolean
     lsd: boolean
@@ -183,7 +189,7 @@ export interface Native {
   checkDebrid: (provider: DebridProviderId, apiKey: string) => Promise<DebridStatus>
   updateToNewEndpoint: (endpoint: string) => Promise<void>
   cachedTorrents: () => Promise<string[]>
-  createNZB: (id: string, url: string, domain: string, port: number, login: string, password: string, poolSize: number) => Promise<void>
+  createNZB: (hash: string, url: string, domain: string, port: number, login: string, password: string, poolSize: number) => Promise<void>
   getDisplays: (cb: (displays: Array<{ friendlyName: string, host: string }>) => void) => Promise<void>
   castPlay: (host: string, hash: string, id: number, media: MediaInformation) => Promise<void>
   castClose: (host: string) => Promise<void>
