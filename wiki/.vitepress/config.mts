@@ -91,6 +91,7 @@ export default defineConfig({
           { text: 'Overview', link: '/extensions/overview' },
           { text: 'Torrent Extensions', link: '/extensions/torrent-extensions' },
           { text: 'NZB Extensions', link: '/extensions/nzb-extensions' },
+          { text: 'Subtitle Extensions', link: '/extensions/subtitle-extensions' },
           {
             text: 'Development',
             items: [
