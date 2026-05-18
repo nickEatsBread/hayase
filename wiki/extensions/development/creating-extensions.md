@@ -102,15 +102,15 @@ interface AnimeQuery {
   exclusions: string[] // list of keywords to exclude from searches, this might be unsupported codecs (e.g., "x265"), sources (e.g., "web-dl"), or other keywords (e.g., "uncensored")
   fetch: typeof globalThis.fetch // fetch function to perform network requests, this function should be used instead of the global fetch to ensure CORS requests work properly
 }
-```
 
-NZB query extends AnimeQuery, and has an additional hash, name, and file of files field depending on if the query is a single or batch.
+// Notably `exclusions` is a list of keywords that the app wants to exclude from search results, this can be used to filter out unwanted results based on their titles. For example, if the environment doesn't support x265, it can add "x265" to the exclusions list and the extension should filter out any results that contain "x265" in their title.
 
-```ts
 type NZBQuery = {
   hash: string
   name: string
 } & Omit<AnimeQuery, 'resolution' | 'exclusions'> & ({file: string} | {files: string[]})
+
+type SubtitleQuery = Omit<AnimeQuery, 'resolution' | 'exclusions'>
 ```
 
 The Result type definitions are as follows:
