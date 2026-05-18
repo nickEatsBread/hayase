@@ -134,8 +134,8 @@ Look for sections named:
 ```
 Service Name: Hayase
 Protocol: TCP+UDP (or Both)
-External Port: 36881
-Internal Port: 36881
+External Port: 36881 [or any other port you forwarded]
+Internal Port: 36881 [or any other port you forwarded]
 Internal IP: 192.168.1.100 (your PC's IP)
 Enabled: Yes
 ```
@@ -149,8 +149,7 @@ Or use NAT like UPnP/NAT-PMP if supported.
 In Hayase settings:
 
 ```
-Network → Incoming Port → 36881
-Save settings
+Client → Forwarded Torrent Port → 36881 [or any other port you forwarded]
 Restart Hayase
 ```
 
@@ -160,7 +159,7 @@ Visit: https://www.yougetsignal.com/tools/open-ports/
 
 ```
 Remote Address: (your public IP)
-Port Number: 36881
+Port Number: 36881 [or any other port you forwarded]
 Check Port
 
 Should say: "Port 36881 is open"
