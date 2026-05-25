@@ -110,6 +110,8 @@ type NZBQuery = {
   name: string
 } & Omit<AnimeQuery, 'resolution' | 'exclusions'> & ({file: string} | {files: string[]})
 
+NZB query extends AnimeQuery, and has an additional hash, name, and file of files field depending on if the query is a single or batch.
+
 type SubtitleQuery = Omit<AnimeQuery, 'resolution' | 'exclusions'>
 ```
 
